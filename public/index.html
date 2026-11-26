@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kreator – buduj strony z AI</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <!-- PULPIT -->
+  <div id="home" class="view" hidden>
+    <header class="topbar">
+      <a class="logo" href="#/">Kreator</a>
+      <span id="mode-badge" class="badge"></span>
+    </header>
+    <main class="home-main">
+      <h1>Co chcesz dziś zbudować?</h1>
+      <form id="new-form" class="prompt-box">
+        <textarea id="new-prompt" rows="4" placeholder="Np. strona dla kawiarni w Krakowie z menu, galerią i formularzem rezerwacji"></textarea>
+        <div class="prompt-actions">
+          <label class="btn ghost" title="Dołącz obraz (np. szkic lub zrzut ekranu)">📎 Obraz<input type="file" id="new-image" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></label>
+          <span id="new-image-list" class="muted small"></span>
+          <button class="btn primary" type="submit">Stwórz ➜</button>
+        </div>
+      </form>
+      <div class="examples">
+        <button class="chip" data-example="Landing page aplikacji do nauki języków z cennikiem i opiniami">Landing page aplikacji</button>
+        <button class="chip" data-example="Portfolio fotografa z galerią i lightboxem">Portfolio fotografa</button>
+        <button class="chip" data-example="Strona restauracji włoskiej z menu i rezerwacją stolika">Restauracja</button>
+        <button class="chip" data-example="Aplikacja lista zadań z filtrami i trybem ciemnym">Lista zadań</button>
+      </div>
+      <h2>Twoje projekty</h2>
+      <div id="projects" class="projects"></div>
+    </main>
+  </div>
+
+  <!-- EDYTOR -->
+  <div id="editor" class="view" hidden>
+    <header class="topbar">
+      <a class="logo" href="#/">← Kreator</a>
+      <input id="project-name" class="name-input" maxlength="80">
+      <div class="spacer"></div>
+      <div class="seg" id="tabs">
+        <button data-tab="preview" class="active">Podgląd</button>
+        <button data-tab="code">Kod</button>
+        <button data-tab="history">Historia</button>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn ghost" id="btn-download" title="Pobierz ZIP">⬇ ZIP</button>
+      <button class="btn primary" id="btn-publish">Opublikuj</button>
+    </header>
+    <div class="workspace">
+      <aside class="chat">
+        <div id="messages" class="messages"></div>
+        <form id="chat-form" class="chat-form">
+          <div id="chat-image-list" class="muted small"></div>
+          <textarea id="chat-input" rows="3" placeholder="Opisz zmianę… (Enter – wyślij, Shift+Enter – nowa linia)"></textarea>
+          <div class="prompt-actions">
+            <label class="btn ghost small">📎<input type="file" id="chat-image" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden></label>
+            <div class="spacer"></div>
+            <button class="btn danger" type="button" id="btn-stop" hidden>■ Zatrzymaj</button>
+            <button class="btn primary" type="submit" id="btn-send">Wyślij</button>
+          </div>
+        </form>
+      </aside>
+      <section class="panel">
+        <!-- podgląd -->
+        <div id="tab-preview" class="tab">
+          <div class="toolbar">
+            <div class="seg" id="devices">
+              <button data-w="100%" class="active" title="Komputer">🖥</button>
+              <button data-w="768px" title="Tablet">▭</button>
+              <button data-w="390px" title="Telefon">📱</button>
+            </div>
+            <select id="page-select" title="Podstrona"></select>
+            <button class="btn ghost small" id="btn-reload" title="Odśwież">⟳</button>
+            <a class="btn ghost small" id="btn-open" target="_blank" title="Otwórz w nowej karcie">↗</a>
+            <span id="publish-info" class="muted small"></span>
+          </div>
+          <div class="frame-wrap"><iframe id="preview" sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"></iframe></div>
+        </div>
+        <!-- kod -->
+        <div id="tab-code" class="tab" hidden>
+          <div class="code-layout">
+            <div class="file-list">
+              <div id="files"></div>
+              <button class="btn ghost small" id="btn-new-file">+ Nowy plik</button>
+            </div>
+            <div class="code-main">
+              <div class="toolbar">
+                <strong id="current-file"></strong>
+                <span id="dirty" class="muted small"></span>
+                <div class="spacer"></div>
+                <button class="btn ghost small" id="btn-rename-file">Zmień nazwę</button>
+                <button class="btn ghost small" id="btn-delete-file">Usuń</button>
+                <button class="btn primary small" id="btn-save-file">Zapisz (Ctrl+S)</button>
+              </div>
+              <textarea id="code" spellcheck="false" wrap="off"></textarea>
+            </div>
+          </div>
+        </div>
+        <!-- historia -->
+        <div id="tab-history" class="tab" hidden>
+          <div id="versions" class="versions"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
