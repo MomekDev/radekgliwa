@@ -18,6 +18,7 @@ Proponuję taki plan:
   }
 
   const index = project.files['index.html'];
+  if (!index && /sklep|shop|płatno|platno|stripe/i.test(prompt)) return newShop(short);
   if (!index) return newSite(short);
 
   if (/zepsuj edycj/i.test(prompt)) {
@@ -193,4 +194,122 @@ load();
 <suggestion>Dodaj sekcję z cennikiem</suggestion>
 <suggestion>Zmień kolory na zielone</suggestion>
 <suggestion>Dodaj galerię zdjęć</suggestion>`;
+}
+
+// sklep: moduły ES w kilku plikach, routing po hashu, koszyk, płatności Stripe
+function newShop(title) {
+  return `(Tryb demo) Tworzę sklep z koszykiem i płatnościami Stripe: ${title}.
+<project-name>Sklep demo</project-name>
+
+<file path="payments.json">
+{
+  "currency": "pln",
+  "products": {
+    "kawa": { "name": "Kawa ziarnista 250 g", "price": 3900, "description": "Etiopia, jasne palenie" },
+    "kubek": { "name": "Kubek ceramiczny", "price": 4500 },
+    "klub": { "name": "Klub kawowy", "price": 5900, "interval": "month" }
+  }
+}
+</file>
+
+<file path="index.html">
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sklep demo</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="bar"><a href="#/" class="logo">☕ Sklep demo</a><a href="#/koszyk" id="cart-link">Koszyk (<span id="cart-count">0</span>)</a></header>
+  <main id="view"></main>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
+</file>
+
+<file path="dziekujemy.html">
+<!doctype html>
+<html lang="pl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Dziękujemy</title><link rel="stylesheet" href="css/style.css"></head>
+<body>
+  <main class="center"><h1 id="msg">Sprawdzam płatność…</h1><p id="details"></p><a href="index.html">Wróć do sklepu</a></main>
+  <script>
+    app.payments.verify().then((r) => {
+      document.getElementById('msg').textContent = r.paid ? 'Dziękujemy za zakup! ✅' : 'Płatność nie została zakończona';
+      if (r.paid) document.getElementById('details').textContent = 'Zapłacono ' + (r.amount / 100).toFixed(2) + ' ' + r.currency.toUpperCase() + ' · ' + (r.email || '');
+      try { if (r.paid) localStorage.removeItem('koszyk'); } catch (e) {}
+    }).catch((e) => { document.getElementById('msg').textContent = e.message; });
+  </script>
+</body>
+</html>
+</file>
+
+<file path="css/style.css">
+body { margin: 0; font-family: system-ui, sans-serif; background: #faf7f2; color: #222; }
+.bar { display: flex; justify-content: space-between; padding: 16px 24px; background: #3b2a20; }
+.bar a { color: #fff; text-decoration: none; font-weight: 600; }
+main { max-width: 960px; margin: 24px auto; padding: 0 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+.product { background: #fff; border-radius: 14px; padding: 18px; box-shadow: 0 4px 16px rgba(0,0,0,.06); }
+button { background: #3b2a20; color: #fff; border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer; }
+.center { text-align: center; padding-top: 60px; }
+.error { color: #b91c1c; }
+</file>
+
+<file path="js/cart.js">
+const KEY = 'koszyk';
+export function getCart() { try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { return []; } }
+export function saveCart(c) { try { localStorage.setItem(KEY, JSON.stringify(c)); } catch (e) {} }
+export function addToCart(id) {
+  const c = getCart(); const it = c.find((x) => x.id === id);
+  if (it) it.quantity++; else c.push({ id, quantity: 1 });
+  saveCart(c); return c;
+}
+</file>
+
+<file path="js/main.js">
+import { getCart, saveCart, addToCart } from './cart.js';
+const view = document.getElementById('view');
+const money = (v) => new Intl.NumberFormat('pl-PL', { style: 'currency', currency: 'PLN' }).format(v / 100);
+let products = [];
+
+function updateCount() { document.getElementById('cart-count').textContent = getCart().reduce((s, i) => s + i.quantity, 0); }
+
+function renderShop() {
+  view.innerHTML = '<h1>Nasze produkty</h1><div class="grid">' + products.map((p) =>
+    '<div class="product"><h3>' + p.name + '</h3><p>' + (p.description || '') + '</p><b>' + money(p.price) + (p.interval ? ' / mies.' : '') + '</b><br><br><button data-add="' + p.id + '">Do koszyka</button></div>').join('') + '</div>';
+}
+function renderCart() {
+  const cart = getCart();
+  if (!cart.length) { view.innerHTML = '<h1>Koszyk</h1><p>Koszyk jest pusty.</p>'; return; }
+  const total = cart.reduce((s, i) => s + (products.find((p) => p.id === i.id)?.price || 0) * i.quantity, 0);
+  view.innerHTML = '<h1>Koszyk</h1><ul>' + cart.map((i) => '<li>' + (products.find((p) => p.id === i.id)?.name || i.id) + ' × ' + i.quantity + '</li>').join('') +
+    '</ul><p>Razem: <b id="total">' + money(total) + '</b></p><button id="pay">Zapłać</button> <button id="clear">Wyczyść</button><p id="pay-error" class="error"></p>';
+}
+async function route() {
+  if (location.hash === '#/koszyk') renderCart(); else renderShop();
+  updateCount();
+}
+view.addEventListener('click', async (e) => {
+  const add = e.target.closest('[data-add]');
+  if (add) { addToCart(add.dataset.add); updateCount(); add.textContent = 'Dodano ✓'; }
+  if (e.target.id === 'clear') { saveCart([]); route(); }
+  if (e.target.id === 'pay') {
+    try {
+      await app.payments.checkout({ items: getCart(), successUrl: new URL('dziekujemy.html', location.href).href, cancelUrl: location.href });
+    } catch (err) { document.getElementById('pay-error').textContent = err.message; }
+  }
+});
+window.addEventListener('hashchange', route);
+app.payments.products().then((r) => { products = r.products; route(); });
+</file>
+
+- Sklep z koszykiem (moduły ES: js/main.js, js/cart.js) i routingiem #/koszyk
+- Produkty i ceny w payments.json, płatność przez Stripe Checkout
+- Strona podziękowania sprawdza płatność
+
+<suggestion>Dodaj stronę produktu ze zdjęciami</suggestion>
+<suggestion>Dodaj kody rabatowe</suggestion>`;
 }

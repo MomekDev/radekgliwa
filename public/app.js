@@ -37,6 +37,7 @@ const ICONS = {
   table: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M12 3v18"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   pencil: '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
+  card: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
   trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
@@ -409,7 +410,9 @@ $('#project-search').addEventListener('input', renderProjects);
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.card-menu') && !e.target.closest('[data-menu]')) $$('.card-menu').forEach((m) => m.remove());
-  if (!e.target.closest('.pop-wrap')) $('#publish-pop').hidden = true;
+  // zamknij każde okienko, poza którym kliknięto
+  const wrap = e.target.closest('.pop-wrap');
+  for (const pop of $$('.pop-wrap .popover')) if (!wrap || !wrap.contains(pop)) pop.hidden = true;
 });
 
 $('#projects').addEventListener('click', async (e) => {
@@ -1481,6 +1484,9 @@ function renderPublish() {
     : `Opublikowano ${fmtAgo(pub.at)}. Publiczna strona jest aktualna.`;
   $('#btn-publish').textContent = pub ? 'Aktualizuj' : 'Opublikuj';
   $('#published-box').hidden = !pub;
+  const doms = p.domains || [];
+  $('#domain-summary').textContent = doms.length ? doms.map((d) => `${d.domain} ${d.verified ? '✓' : '(czeka na DNS)'}`).join(', ') : 'np. mojafirma.pl';
+  $('#btn-domains').lastChild.textContent = doms.length ? 'Zarządzaj' : 'Podłącz';
   if (pub) {
     $('#published-link').href = pub.url;
     $('#published-link').textContent = pub.url;
@@ -1532,6 +1538,18 @@ $('#btn-project-settings').onclick = async () => {
     text: 'Instrukcje są dołączane do każdej prośby do AI – np. kolory marki, styl, ton tekstów, dane firmy.',
     fields: [
       { name: 'name', label: 'Nazwa projektu', value: p.name },
+      {
+        name: 'quality',
+        label: 'Jakość AI',
+        type: 'select',
+        value: p.quality || '',
+        options: [
+          ['', 'Domyślna (ustawienie serwera)'],
+          ['low', 'Szybko – proste zmiany, najtaniej'],
+          ['medium', 'Standard – dobry balans'],
+          ['high', 'Najwyższa – złożone aplikacje, wolniej i drożej'],
+        ],
+      },
       { name: 'instructions', label: 'Instrukcje dla AI', type: 'textarea', rows: 8, value: p.instructions, placeholder: 'Np. Kolory marki: #1f6feb i #f5a623. Styl minimalistyczny. Teksty po polsku, zwracaj się do klienta per „Ty”. Telefon: 600 100 200.' },
     ],
     okText: 'Zapisz',
@@ -1539,9 +1557,169 @@ $('#btn-project-settings').onclick = async () => {
   });
   if (!v) return;
   try {
-    S.project = await api(`/api/projects/${p.id}`, { method: 'PATCH', body: { name: v.name, instructions: v.instructions } });
+    S.project = await api(`/api/projects/${p.id}`, { method: 'PATCH', body: { name: v.name, instructions: v.instructions, quality: v.quality } });
     renderAll();
     toast('Zapisano ustawienia projektu');
+  } catch (err) {
+    toast(err.message, true);
+  }
+};
+
+// menu „więcej” na telefonie
+$('#btn-more').onclick = () => ($('#more-pop').hidden = !$('#more-pop').hidden);
+$('#more-pop').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-proxy]');
+  if (!b) return;
+  $('#more-pop').hidden = true;
+  document.getElementById(b.dataset.proxy).click();
+});
+
+// ---------- własne domeny ----------
+function renderDomains(r) {
+  const box = $('#dom-list');
+  if (!r.domains.length) {
+    box.innerHTML = '<p class="muted small">Nie podłączono jeszcze żadnej domeny.</p>';
+    return;
+  }
+  const missingTarget = !r.targets.ip && !r.targets.cname;
+  box.innerHTML = r.domains
+    .map(
+      (d) => `
+    <div class="domain-card">
+      <div class="row"><b>${esc(d.domain)}</b><span class="pill ${d.verified ? 'live' : 'test'}">${d.verified ? 'połączona' : 'czeka na DNS'}</span><div class="spacer"></div>
+        ${d.verified ? `<a class="btn ghost small" href="https://${esc(d.domain)}/" target="_blank" rel="noopener">${ic('external')}Otwórz</a>` : ''}
+        <button type="button" class="btn ghost small" data-verify="${esc(d.domain)}">${ic('refresh')}Sprawdź</button>
+        <button type="button" class="btn ghost small danger-text" data-remove="${esc(d.domain)}">Usuń</button></div>
+      ${d.verified && !S.project.published ? '<p class="note">Domena działa, ale strona nie jest jeszcze opublikowana – kliknij „Opublikuj”.</p>' : ''}
+      ${!d.verified ? `<p class="muted small">Dodaj u rejestratora domeny te rekordy DNS:</p>
+      <div class="table-wrap"><table class="data dns"><thead><tr><th>Typ</th><th>Nazwa (host)</th><th>Wartość</th><th></th></tr></thead><tbody>${d.records
+        .map(
+          (x) => `<tr><td><b>${esc(x.type)}</b></td><td><code>${esc(x.name)}</code></td><td><code>${esc(x.value)}</code></td><td class="actions"><button type="button" class="btn ghost small" data-copy="${esc(x.value)}" title="${esc(x.purpose)}">${ic('copy')}</button></td></tr>`
+        )
+        .join('')}</tbody></table></div>
+      ${missingTarget ? '<p class="note">Administrator serwera nie ustawił jeszcze DOMAIN_IP / DOMAIN_CNAME_TARGET – zobacz README.</p>' : ''}
+      ${d.lastError ? `<p class="error-text">${esc(d.lastError).replace(/\n/g, '<br>')}</p>` : ''}` : ''}
+    </div>`
+    )
+    .join('');
+}
+async function loadDomains() {
+  try {
+    renderDomains(await api(`/api/projects/${S.project.id}/domains`));
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+async function refreshProjectQuiet() {
+  const fresh = await api(`/api/projects/${S.project.id}`).catch(() => null);
+  if (fresh && S.project?.id === fresh.id) {
+    S.project = fresh;
+    renderPublish();
+  }
+}
+$('#btn-domains').onclick = async () => {
+  $('#dom-error').textContent = '';
+  $('#domains-form').reset();
+  await loadDomains();
+  $('#domains-dialog').showModal();
+};
+$('#dom-close').onclick = () => $('#domains-dialog').close();
+$('#domains-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#dom-error').textContent = '';
+  try {
+    renderDomains(await api(`/api/projects/${S.project.id}/domains`, { method: 'POST', body: { domain: e.target.elements.domain.value } }));
+    e.target.reset();
+    refreshProjectQuiet();
+  } catch (err) {
+    $('#dom-error').textContent = err.message;
+  }
+});
+$('#dom-list').addEventListener('click', async (e) => {
+  const v = e.target.closest('[data-verify]');
+  const r = e.target.closest('[data-remove]');
+  const c = e.target.closest('[data-copy]');
+  if (c) return navigator.clipboard.writeText(c.dataset.copy).then(() => toast('Skopiowano'), () => toast('Nie udało się skopiować', true));
+  try {
+    if (v) {
+      v.disabled = true;
+      const res = await api(`/api/projects/${S.project.id}/domains/${encodeURIComponent(v.dataset.verify)}/verify`, { method: 'POST' });
+      renderDomains(res);
+      toast(res.ok ? 'Domena połączona! 🎉' : 'DNS jeszcze nie jest gotowy – sprawdź rekordy i spróbuj za chwilę', !res.ok);
+      refreshProjectQuiet();
+    } else if (r) {
+      if (!(await confirmDlg('Usunąć domenę?', `Strona przestanie działać pod adresem ${r.dataset.remove}.`, 'Usuń'))) return;
+      renderDomains(await api(`/api/projects/${S.project.id}/domains/${encodeURIComponent(r.dataset.remove)}`, { method: 'DELETE' }));
+      refreshProjectQuiet();
+    }
+  } catch (err) {
+    toast(err.message, true);
+    if (v) v.disabled = false;
+  }
+});
+
+// ---------- płatności ----------
+const fmtMoney = (amount, currency) =>
+  amount == null ? '—' : new Intl.NumberFormat('pl-PL', { style: 'currency', currency: (currency || 'pln').toUpperCase() }).format(amount / 100);
+const ORDER_STATUS = { paid: 'opłacone', pending: 'oczekuje', processing: 'w trakcie', failed: 'nieudane', expired: 'wygasłe' };
+function renderPayments(st) {
+  const pill = $('#pay-status');
+  pill.textContent = !st.configured ? 'nie podłączono' : st.mode === 'live' ? 'tryb na żywo' : 'tryb testowy';
+  pill.className = 'pill' + (st.configured ? (st.mode === 'live' ? ' live' : ' test') : '');
+  $('#pay-key-hint').textContent = st.configured ? `Zapisany klucz: ${st.keyHint}. Wpisz nowy, aby go zmienić.` : '';
+  $('#pay-webhook-url').value = st.webhookUrl;
+  $('#pay-webhook-hint').textContent = st.webhookConfigured ? 'Webhook skonfigurowany ✓' : 'Bez webhooka płatność jest potwierdzana, gdy klient wróci na stronę podziękowania.';
+  $('#pay-disconnect').hidden = !st.configured;
+  $('#pay-products').innerHTML = st.catalogError
+    ? `<p class="error-text">${esc(st.catalogError)}</p>`
+    : st.products.length
+    ? `<div class="table-wrap"><table class="data"><thead><tr><th>Produkt</th><th>Cena</th><th>ID</th></tr></thead><tbody>${st.products
+        .map((p) => `<tr><td>${esc(p.name)}</td><td>${p.price == null ? 'cena ze Stripe' : esc(fmtMoney(p.price, p.currency))}${p.interval ? ` / ${esc({ day: 'dzień', week: 'tydzień', month: 'miesiąc', year: 'rok' }[p.interval])}` : ''}</td><td><code>${esc(p.id)}</code></td></tr>`)
+        .join('')}</tbody></table></div>`
+    : '<p class="muted small">Brak produktów. Napisz w czacie np. „dodaj sklep z 3 produktami i płatnością Stripe”.</p>';
+  $('#pay-orders').innerHTML = st.orders.length
+    ? `<div class="table-wrap"><table class="data"><thead><tr><th>Data</th><th>Klient</th><th>Produkty</th><th>Kwota</th><th>Status</th></tr></thead><tbody>${st.orders
+        .map(
+          (o) =>
+            `<tr><td>${fmtDate(o.created_at)}</td><td>${esc(o.email || '—')}</td><td>${esc(o.items.map((i) => `${i.name} ×${i.quantity}`).join(', '))}</td><td>${esc(fmtMoney(o.amount, o.currency))}</td><td><span class="pill ${o.status === 'paid' ? 'live' : ''}">${esc(ORDER_STATUS[o.status] || o.status)}</span>${o.livemode ? '' : ' <span class="muted small">test</span>'}</td></tr>`
+        )
+        .join('')}</tbody></table></div>`
+    : '<p class="muted small">Brak zamówień. Testowo zapłacisz kartą 4242 4242 4242 4242 (dowolna przyszła data i CVC).</p>';
+}
+$('#btn-payments').onclick = async () => {
+  const dlg = $('#payments-dialog');
+  $('#pay-error').textContent = '';
+  $('#payments-form').reset();
+  try {
+    renderPayments(await api(`/api/projects/${S.project.id}/payments`));
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  dlg.showModal();
+};
+$('#pay-close').onclick = () => $('#payments-dialog').close();
+$('#pay-copy-webhook').onclick = () => navigator.clipboard.writeText($('#pay-webhook-url').value).then(() => toast('Skopiowano adres webhooka'), () => toast('Nie udało się skopiować', true));
+$('#payments-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target.elements;
+  if (!f.secretKey.value.trim() && !f.webhookSecret.value.trim()) return ($('#pay-error').textContent = 'Wpisz klucz Stripe lub sekret webhooka');
+  $('#pay-save').disabled = true;
+  $('#pay-error').textContent = '';
+  try {
+    renderPayments(await api(`/api/projects/${S.project.id}/payments`, { method: 'PUT', body: { secretKey: f.secretKey.value.trim(), webhookSecret: f.webhookSecret.value.trim() } }));
+    $('#payments-form').reset();
+    toast('Zapisano ustawienia płatności');
+  } catch (err) {
+    $('#pay-error').textContent = err.message;
+  } finally {
+    $('#pay-save').disabled = false;
+  }
+});
+$('#pay-disconnect').onclick = async () => {
+  if (!(await confirmDlg('Odłączyć Stripe?', 'Klienci nie będą mogli płacić, dopóki nie podłączysz klucza ponownie. Historia zamówień zostanie.', 'Odłącz'))) return;
+  try {
+    renderPayments(await api(`/api/projects/${S.project.id}/payments`, { method: 'DELETE' }));
+    $('#payments-dialog').showModal();
   } catch (err) {
     toast(err.message, true);
   }

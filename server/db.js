@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 for (const sql of [
   "ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
   'ALTER TABLE projects ADD COLUMN preview_key TEXT',
+  "ALTER TABLE projects ADD COLUMN quality TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.exec(sql);

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import * as D from './db.js';
 import { safePath, slugify, rateLimit, mimeOf, TEXT_EXT, has, RULES_FILE, parseRules, normalizeRule } from './util.js';
 import { startJob, getJob, stopJob, DEMO, MODEL } from './ai.js';
+import { mountBuilderPayments } from './payments.js';
+import { normalizeDomain, domainView, checkDomain, projectForHost, invalidateDomainCache, dnsTargets } from './domains.js';
 import { createSitesApp } from './sites.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +45,25 @@ function siteUrls(req, p) {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', TRUST_PROXY);
+
+// własne domeny: żądania na zweryfikowaną domenę obsługuje serwer stron
+const domainSites = createSitesApp({ builderOrigin: () => '' });
+app.use((req, res, next) => (projectForHost(req.hostname) ? domainSites(req, res, next) : next()));
+
+// dla Caddy (on_demand_tls): czy wolno wystawić certyfikat dla tej domeny
+app.get('/_kreator/tls-allowed', (req, res) => {
+  const d = String(req.query.domain || '').toLowerCase();
+  const sh = SITES_HOSTNAME;
+  const pub = (() => {
+    try {
+      return new URL(process.env.PUBLIC_URL).hostname;
+    } catch {
+      return null;
+    }
+  })();
+  const ok = projectForHost(d) || d === sh || d === pub || (WILDCARD && sh && d.endsWith('.' + sh) && d.slice(0, -(sh.length + 1)).indexOf('.') === -1);
+  res.sendStatus(ok ? 200 : 404);
+});
 
 // tryb jednej domeny: strony użytkowników na podanym hoście
 let sitesApp = null;
@@ -156,6 +177,11 @@ function stripBodies(text) {
 const MAX_PROJECTS = Number(process.env.MAX_PROJECTS || 100);
 const isHexId = (s) => /^[a-f0-9]{12}([a-f0-9]{4})?$/.test(s);
 const RESERVED_SLUGS = new Set(['www', 'api', 'app', 'admin', 'mail', 'static', 'assets', 'preview', 'sites']);
+function customDomainUrl(pid) {
+  const d = D.one('SELECT domain FROM domains WHERE project_id = ? AND verified_at IS NOT NULL ORDER BY created_at LIMIT 1', pid);
+  return d ? `https://${d.domain}/` : null;
+}
+
 function projectView(p, req) {
   const urls = siteUrls(req, p);
   return {
@@ -169,12 +195,19 @@ function projectView(p, req) {
     messages: D.getMessages(p.id).map((m) => (m.role === 'assistant' && m.meta?.status !== 'running' ? { ...m, content: stripBodies(m.content) } : m)),
     versions: D.all('SELECT id, label, ts FROM versions WHERE project_id = ? ORDER BY ts', p.id),
     instructions: p.instructions || '',
+    quality: p.quality || '',
     previewUrl: urls.preview,
     slugPrefix: WILDCARD ? null : `${sitesUrl(req).replace(/^https?:\/\//, '')}/s/`,
     slugSuffix: WILDCARD ? `.${WILDCARD}` : null,
     published: p.published_at && urls.published
-      ? { at: p.published_at, url: urls.published, outdated: JSON.stringify(p.files) !== JSON.stringify(p.published_files) }
+      ? {
+          at: p.published_at,
+          url: customDomainUrl(p.id) || urls.published,
+          defaultUrl: urls.published,
+          outdated: JSON.stringify(p.files) !== JSON.stringify(p.published_files),
+        }
       : null,
+    domains: D.all('SELECT domain, verified_at FROM domains WHERE project_id = ? ORDER BY created_at', p.id).map((d) => ({ domain: d.domain, verified: !!d.verified_at })),
     generating: !!getJob(p.id),
   };
 }
@@ -224,6 +257,10 @@ app.patch('/api/projects/:id', withProject, (req, res) => {
     const name = String(req.body.name).trim();
     if (!name) return res.status(400).json({ error: 'Nazwa nie może być pusta' });
     D.run('UPDATE projects SET name = ? WHERE id = ?', name.slice(0, 80), p.id);
+  }
+  if (req.body?.quality !== undefined) {
+    const q = ['low', 'medium', 'high'].includes(req.body.quality) ? req.body.quality : '';
+    D.run('UPDATE projects SET quality = ? WHERE id = ?', q, p.id);
   }
   if (req.body?.instructions !== undefined) {
     D.run('UPDATE projects SET instructions = ? WHERE id = ?', String(req.body.instructions).slice(0, 5000), p.id);
@@ -480,6 +517,46 @@ app.delete('/api/projects/:id/app-users/:uid', withProject, (req, res) => {
   if (!r.changes) return res.status(404).json({ error: 'Użytkownik nie istnieje' });
   res.json({ ok: true });
 });
+
+// --- własne domeny
+const domainsOf = (pid) => D.all('SELECT * FROM domains WHERE project_id = ? ORDER BY created_at', pid).map(domainView);
+app.get('/api/projects/:id/domains', withProject, (req, res) => res.json({ domains: domainsOf(req.project.id), targets: dnsTargets() }));
+
+app.post('/api/projects/:id/domains', withProject, (req, res) => {
+  const d = normalizeDomain(req.body?.domain);
+  if (!d) return res.status(400).json({ error: 'Podaj prawidłową domenę, np. mojafirma.pl albo sklep.mojafirma.pl' });
+  const own = [SITES_HOSTNAME, (() => { try { return new URL(process.env.PUBLIC_URL).hostname; } catch { return ''; } })(), 'localhost'].filter(Boolean);
+  if (own.some((h) => d === h || d.endsWith('.' + h))) return res.status(400).json({ error: 'Tej domeny nie można podłączyć' });
+  const existing = D.one('SELECT project_id, verified_at FROM domains WHERE domain = ?', d);
+  if (existing?.project_id === req.project.id) return res.status(409).json({ error: 'Ta domena jest już dodana' });
+  if (existing?.verified_at) return res.status(409).json({ error: 'Ta domena jest już podłączona do innego projektu' });
+  // niezweryfikowane zgłoszenie nie blokuje prawdziwego właściciela – domenę dostaje ten, kto potwierdzi ją rekordem TXT
+  if (existing) D.run('DELETE FROM domains WHERE domain = ? AND verified_at IS NULL', d);
+  if (D.one('SELECT COUNT(*) AS n FROM domains WHERE project_id = ?', req.project.id).n >= 10) return res.status(400).json({ error: 'Maksymalnie 10 domen na projekt' });
+  D.run('INSERT INTO domains (domain, project_id, token, created_at) VALUES (?, ?, ?, ?)', d, req.project.id, D.newId(10), Date.now());
+  res.status(201).json({ domains: domainsOf(req.project.id), targets: dnsTargets() });
+});
+
+app.post('/api/projects/:id/domains/:domain/verify', withProject, async (req, res) => {
+  const row = D.one('SELECT * FROM domains WHERE domain = ? AND project_id = ?', String(req.params.domain).toLowerCase(), req.project.id);
+  if (!row) return res.status(404).json({ error: 'Nie ma takiej domeny w projekcie' });
+  if (!rateLimit(`dns:${req.user.id}`, 30, 600_000)) return res.status(429).json({ error: 'Za dużo sprawdzeń – spróbuj za kilka minut' });
+  const r = await checkDomain(row);
+  D.run('UPDATE domains SET verified_at = ?, last_check_at = ?, last_error = ? WHERE domain = ?', r.ok ? row.verified_at || Date.now() : null, Date.now(), r.ok ? null : r.problems.join('\n'), row.domain);
+  invalidateDomainCache();
+  res.json({ ok: r.ok, problems: r.problems, domains: domainsOf(req.project.id), targets: dnsTargets() });
+});
+
+app.delete('/api/projects/:id/domains/:domain', withProject, (req, res) => {
+  const r = D.run('DELETE FROM domains WHERE domain = ? AND project_id = ?', String(req.params.domain).toLowerCase(), req.project.id);
+  if (!r.changes) return res.status(404).json({ error: 'Nie ma takiej domeny w projekcie' });
+  invalidateDomainCache();
+  res.json({ domains: domainsOf(req.project.id), targets: dnsTargets() });
+});
+
+// --- płatności Stripe (konfiguracja i zamówienia)
+const sitesApiBase = (req) => (WILDCARD ? `${process.env.SITES_PROTOCOL || req.protocol}://${WILDCARD}` : sitesUrl(req));
+mountBuilderPayments(app, { withProject, sitesApiBase });
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Nieznany adres API' }));
 

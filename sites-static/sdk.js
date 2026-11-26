@@ -102,7 +102,42 @@
     listeners.slice().forEach(function (cb) { try { cb(u); } catch (err) { console.error(err); } });
   });
 
-  var api = { __kreator: true, projectId: projectId, db: { collection: collection }, auth: auth };
+  // ---- płatności Stripe
+  var payments = {
+    products: function () { return request('GET', 'payments/products'); },
+    checkout: function (o) {
+      o = o || {};
+      var here = location.href.split('#')[0];
+      var body = {
+        items: o.items || [],
+        successUrl: o.successUrl || here,
+        cancelUrl: o.cancelUrl || here,
+        email: o.email,
+        collectAddress: !!o.collectAddress,
+        collectPhone: !!o.collectPhone,
+      };
+      // w podglądzie (ramka) Stripe otwieramy w nowej karcie – Stripe nie działa w ramkach
+      var inFrame = window.top !== window;
+      var popup = inFrame ? window.open('', '_blank') : null;
+      return request('POST', 'payments/checkout', body).then(function (r) {
+        if (popup) popup.location.href = r.url;
+        else if (inFrame) window.open(r.url, '_blank');
+        else location.href = r.url;
+        return r;
+      }, function (e) {
+        if (popup) popup.close();
+        throw e;
+      });
+    },
+    verify: function (sessionId) {
+      var sid = sessionId || new URLSearchParams(location.search).get('session_id');
+      if (!sid) return Promise.resolve({ paid: false, status: 'none' });
+      return request('GET', 'payments/session/' + encodeURIComponent(sid));
+    },
+    myOrders: function () { return request('GET', 'payments/orders'); },
+  };
+
+  var api = { __kreator: true, projectId: projectId, db: { collection: collection }, auth: auth, payments: payments };
   // window.kreator zawsze działa; window.app – o ile strona nie nadpisze tej nazwy własną zmienną
   window.kreator = api;
   window.app = api;

@@ -43,6 +43,10 @@ Bez klucza (albo z `npm run demo`) kreator działa w **trybie demo**. Zamiast AI
 - wgrywanie obrazów, wideo, czcionek i PDF-ów do projektu
 - historia wersji: każda zmiana AI i każdy ręczny zapis tworzy wersję, którą można przywrócić
 
+**Płatności i domeny (jak w Lovable / Base44)**
+- **Płatności Stripe**: podłączasz własne konto Stripe (przycisk „Płatności”), a AI buduje sklep, koszyk, subskrypcje lub darowizny. Klienci płacą na stronie Stripe kartą, BLIK-iem lub Przelewy24. Zamówienia widzisz w kreatorze.
+- **Własna domena**: podłączasz np. `mojafirma.pl`. Kreator pokazuje rekordy DNS, sprawdza je i włącza stronę pod tą domeną z automatycznym HTTPS.
+
 **Publikacja i projekty**
 - publikacja pod własnym adresem, aktualizacja i cofnięcie publikacji
 - pobieranie projektu jako ZIP; baza danych działa także po pobraniu
@@ -86,14 +90,48 @@ Dane z formularzy (kontakt, rezerwacje, zamówienia) powinny być `private`, a A
 
 Podgląd niepublikowanej wersji działa pod tajnym, losowym adresem. Publicznie widać tylko to, co opublikujesz.
 
+## Płatności Stripe
+
+1. Załóż konto na https://stripe.com i skopiuj *Secret key* (Developers → API keys). Na początek użyj klucza testowego `sk_test_…`.
+2. W kreatorze kliknij **Płatności** (ikona karty) i wklej klucz. Kreator sprawdzi go w Stripe.
+3. Poproś AI np. „zrób sklep z 3 produktami i płatnością”. AI zapisze produkty i ceny w pliku `payments.json` (ceny w groszach), a na stronie użyje `app.payments.checkout()`.
+4. (Zalecane) W Stripe dodaj webhook z adresem pokazanym w oknie „Płatności” i wklej jego *Signing secret* (`whsec_…`). Dzięki temu zamówienia zapiszą się nawet wtedy, gdy klient zamknie kartę przed powrotem na stronę.
+5. Testowo zapłacisz kartą `4242 4242 4242 4242` (dowolna przyszła data i CVC). Gdy wszystko działa, podmień klucz na `sk_live_…`.
+
+Bezpieczeństwo: ceny są tylko w `payments.json` (strona wybiera produkt i ilość, więc klient nie może zmienić ceny). Klucze Stripe są szyfrowane w bazie (AES-256-GCM, klucz z `SECRET_KEY`) i nigdy nie trafiają do przeglądarki. Webhooki są weryfikowane podpisem.
+
+```js
+const { products } = await app.payments.products();
+await app.payments.checkout({ items: [{ id: 'kawa', quantity: 2 }], successUrl: new URL('dziekujemy.html', location.href).href });
+const wynik = await app.payments.verify();   // na stronie podziękowania: { paid, amount, currency, email, items }
+```
+
+## Własne domeny
+
+W oknie publikacji kliknij **Własna domena → Podłącz** i wpisz domenę. Kreator pokaże rekordy do ustawienia u rejestratora:
+- **TXT** `_kreator.twojadomena.pl` – potwierdza, że domena należy do Ciebie;
+- **A** (na adres `DOMAIN_IP`) albo **CNAME** (na `DOMAIN_CNAME_TARGET`) – kieruje domenę na serwer.
+
+Po kliknięciu **Sprawdź** opublikowana strona działa pod Twoją domeną, a Caddy automatycznie wystawi certyfikat HTTPS. Domenę dostaje ten, kto pierwszy potwierdzi ją rekordem TXT.
+
 ## Wdrożenie na serwer
 
-### Docker
+### Docker + HTTPS (zalecane)
+
+Potrzebujesz serwera (VPS) z Dockerem i domeny, np. `mojadomena.pl`. W DNS ustaw rekordy A na IP serwera dla:
+`kreator.mojadomena.pl`, `sites.mojadomena.pl` i `*.sites.mojadomena.pl`.
 
 ```bash
-cp .env.example .env      # uzupełnij klucz i adresy
+cp .env.example .env
+```
+
+W `.env` ustaw co najmniej: `ANTHROPIC_API_KEY`, `KREATOR_DOMAIN=kreator.mojadomena.pl`, `PUBLIC_URL=https://kreator.mojadomena.pl`, `SITES_HOST=sites.mojadomena.pl`, `SITES_WILDCARD=1`, `SITES_PROTOCOL=https`, `DOMAIN_IP=<IP serwera>`, `SECRET_KEY=<długi losowy ciąg>`.
+
+```bash
 docker compose up -d --build
 ```
+
+Caddy (plik `Caddyfile`) sam wystawia certyfikaty HTTPS dla kreatora, każdej strony i własnych domen klientów.
 
 Dane (baza SQLite) są zapisywane w wolumenie `kreator-data`. Kopię zapasową robisz, kopiując plik `kreator.db`.
 
@@ -131,8 +169,12 @@ server/index.js    serwer kreatora: konta, projekty, czat z AI, pliki, publikacj
 server/ai.js       generowanie z Claude: zadania w tle, prompt, stosowanie zmian, automatyczna naprawa
 server/sites.js    serwer stron użytkowników + API backendu aplikacji (baza danych, logowanie)
 server/db.js       baza SQLite (wbudowana w Node.js)
+server/payments.js płatności Stripe (Checkout, weryfikacja, webhooki, zamówienia)
+server/domains.js  własne domeny (weryfikacja DNS)
+server/secrets.js  szyfrowanie kluczy projektów
 server/mock.js     odpowiedzi trybu demo
 public/            interfejs kreatora (index.html, app.js, app.css) i parser odpowiedzi AI
+Caddyfile          HTTPS i automatyczne certyfikaty (produkcja)
 sites-static/      sdk.js (window.app dla stron) i bridge.js (błędy + wybór elementu w podglądzie)
 tests/             testy automatyczne (npm test)
 ```

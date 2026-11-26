@@ -133,7 +133,10 @@ textarea.input { font: 13px/1.5 var(--mono); resize: vertical; }
 .tabs { display: inline-flex; gap: 2px; background: var(--panel-2); padding: 3px; border-radius: 11px; }
 .tabs button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--muted); padding: 5px 11px; border-radius: 8px; cursor: pointer; font: 500 13px var(--font); }
 .tabs button.active { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
-.mobile-only { display: none !important; }
+.mobile-only, .mobile-only-flex { display: none !important; }
+.popover.menu { width: 230px; padding: 6px; display: flex; flex-direction: column; }
+.popover.menu button { display: flex; align-items: center; gap: 10px; border: 0; background: none; color: var(--text); padding: 10px; border-radius: 8px; font: 14px var(--font); cursor: pointer; text-align: left; }
+.popover.menu button:hover { background: var(--panel-2); }
 .seg { display: inline-flex; background: var(--panel-2); padding: 2px; border-radius: 9px; }
 .seg button { border: 0; background: transparent; color: var(--muted); padding: 5px 8px; border-radius: 7px; cursor: pointer; display: inline-flex; }
 .seg button.active { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
@@ -252,6 +255,20 @@ table.data td.actions { white-space: nowrap; text-align: right; }
 .dialog h2 { margin-top: 12px; }
 .dialog details { margin: 8px 0 12px; } .dialog summary { cursor: pointer; font-weight: 500; margin-bottom: 8px; }
 .dialog h4 { margin-top: 12px; }
+.domain-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.domain-row > div { flex: 1; min-width: 0; }
+.domain-row .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.domain-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.domain-card p { margin: 0; }
+table.dns td { white-space: normal; word-break: break-all; }
+.dialog.wide { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); }
+.steps { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.step { background: var(--panel-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.step p { margin: 0; }
+.step code, .dialog code { font: 12px var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.step code { background: var(--panel); }
+.pill.test { background: var(--warn-bg); color: var(--warn-text); }
+@media (max-width: 700px) { .steps { grid-template-columns: 1fr; } }
 .usage { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
 .usage div { background: var(--panel-2); border-radius: 10px; padding: 10px; }
 .usage b { display: block; font-size: 18px; }
@@ -264,10 +281,13 @@ table.data td.actions { white-space: nowrap; text-align: right; }
 /* ===== telefon ===== */
 @media (max-width: 860px) {
   .mobile-only { display: inline-flex !important; }
+  .mobile-only-flex { display: block !important; }
+  .desktop-only { display: none !important; }
+  .popover.menu { position: absolute; left: auto; right: 0; top: calc(100% + 6px); width: 230px; }
   .tabs button span { display: none; }
   .tabs button.active span { display: inline; }
   .name-input, .topbar > .brand-mark { display: none; }
-  #btn-download, #btn-project-settings { padding: 5px; }
+
   .topbar { gap: 4px; padding: 0 6px; }
   .tabs { overflow-x: auto; }
   .tabs button { padding: 5px 8px; }
@@ -285,4 +305,10 @@ table.data td.actions { white-space: nowrap; text-align: right; }
   .nav { padding: 12px 16px; }
   .hero { padding-top: 40px; }
   #user-name { display: none; }
+}
+
+/* bardzo wąskie telefony */
+@media (max-width: 380px) {
+  .tabs button.active span { display: none; }
+  .tabs button { padding: 5px 7px; }
 }

@@ -75,8 +75,17 @@
         <button data-tab="history"><i data-icon="history"></i><span>Historia</span></button>
       </nav>
       <div class="spacer"></div>
-      <button class="btn ghost icon" id="btn-project-settings" title="Ustawienia projektu i instrukcje dla AI"><i data-icon="settings"></i></button>
-      <button class="btn ghost icon" id="btn-download" title="Pobierz projekt (ZIP)"><i data-icon="download"></i></button>
+      <div class="pop-wrap mobile-only-flex">
+        <button class="btn ghost icon" id="btn-more" title="Więcej"><i data-icon="more"></i></button>
+        <div class="popover menu" id="more-pop" hidden>
+          <button data-proxy="btn-payments"><i data-icon="card"></i>Płatności Stripe</button>
+          <button data-proxy="btn-project-settings"><i data-icon="settings"></i>Ustawienia projektu</button>
+          <button data-proxy="btn-download"><i data-icon="download"></i>Pobierz ZIP</button>
+        </div>
+      </div>
+      <button class="btn ghost icon desktop-only" id="btn-payments" title="Płatności Stripe"><i data-icon="card"></i></button>
+      <button class="btn ghost icon desktop-only" id="btn-project-settings" title="Ustawienia projektu i instrukcje dla AI"><i data-icon="settings"></i></button>
+      <button class="btn ghost icon desktop-only" id="btn-download" title="Pobierz projekt (ZIP)"><i data-icon="download"></i></button>
       <div class="pop-wrap">
         <button class="btn primary" id="btn-publish-menu"><i data-icon="globe"></i><span>Opublikuj</span></button>
         <div class="popover" id="publish-pop" hidden>
@@ -88,6 +97,10 @@
           <div class="row wrap">
             <button class="btn primary" id="btn-publish">Opublikuj</button>
             <button class="btn ghost" id="btn-save-slug">Zapisz adres</button>
+          </div>
+          <div class="domain-row">
+            <div><b>Własna domena</b><div class="muted small" id="domain-summary">np. mojafirma.pl</div></div>
+            <button class="btn ghost small" id="btn-domains"><i data-icon="globe"></i>Podłącz</button>
           </div>
           <div id="published-box" hidden>
             <a id="published-link" target="_blank" rel="noopener"></a>
@@ -257,6 +270,48 @@
         <button class="btn ghost" type="button" id="settings-cancel">Zamknij</button>
         <button class="btn primary" type="submit">Zapisz</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="payments-dialog" class="dialog wide">
+    <form method="dialog" id="payments-form">
+      <div class="row"><h3 style="margin:0">Płatności Stripe</h3><span id="pay-status" class="pill"></span><div class="spacer"></div><button type="button" class="btn ghost icon" id="pay-close" title="Zamknij">×</button></div>
+      <p class="muted small">Klienci płacą kartą, BLIK-iem lub Przelewy24 na stronie Stripe, a pieniądze trafiają na <b>Twoje</b> konto Stripe. Produkty i ceny AI zapisuje w pliku <code>payments.json</code>.</p>
+      <div class="steps">
+        <div class="step">
+          <b>1. Klucz API</b>
+          <p class="muted small">Skopiuj <i>Secret key</i> z <a href="https://dashboard.stripe.com/test/apikeys" target="_blank" rel="noopener">dashboard.stripe.com → Developers → API keys</a>. Zacznij od klucza testowego (<code>sk_test_…</code>), a gdy wszystko działa – wklej klucz <code>sk_live_…</code>.</p>
+          <input class="input" name="secretKey" type="password" autocomplete="off" placeholder="sk_test_…">
+          <p class="muted small" id="pay-key-hint"></p>
+        </div>
+        <div class="step">
+          <b>2. Webhook (zalecane)</b>
+          <p class="muted small">W Stripe: Developers → Webhooks → <i>Add endpoint</i>. Wklej adres poniżej i wybierz zdarzenia <code>checkout.session.completed</code>, <code>checkout.session.async_payment_succeeded</code>, <code>checkout.session.async_payment_failed</code>. Potem skopiuj <i>Signing secret</i>.</p>
+          <div class="row"><input class="input" id="pay-webhook-url" readonly><button type="button" class="btn ghost small" id="pay-copy-webhook"><i data-icon="copy"></i>Kopiuj</button></div>
+          <input class="input" name="webhookSecret" type="password" autocomplete="off" placeholder="whsec_…" style="margin-top:8px">
+          <p class="muted small" id="pay-webhook-hint"></p>
+        </div>
+      </div>
+      <p class="error-text" id="pay-error"></p>
+      <div class="row end">
+        <button type="button" class="btn ghost danger-text" id="pay-disconnect">Odłącz Stripe</button>
+        <div class="spacer"></div>
+        <button class="btn primary" type="submit" id="pay-save">Zapisz</button>
+      </div>
+      <h4>Produkty <span class="muted small">(z pliku payments.json)</span></h4>
+      <div id="pay-products"></div>
+      <h4>Zamówienia</h4>
+      <div id="pay-orders"></div>
+    </form>
+  </dialog>
+
+  <dialog id="domains-dialog" class="dialog wide">
+    <form method="dialog" id="domains-form">
+      <div class="row"><h3 style="margin:0">Własna domena</h3><div class="spacer"></div><button type="button" class="btn ghost icon" id="dom-close" title="Zamknij">×</button></div>
+      <p class="muted small">Podłącz domenę kupioną np. w OVH, home.pl, nazwa.pl lub Cloudflare. Po dodaniu ustaw u rejestratora rekordy DNS z tabeli i kliknij „Sprawdź”. Zmiany DNS mogą potrwać od kilku minut do kilku godzin. Certyfikat HTTPS wystawi się automatycznie.</p>
+      <div class="row"><input class="input" name="domain" placeholder="mojafirma.pl lub www.mojafirma.pl" autocomplete="off"><button class="btn primary" type="submit">Dodaj</button></div>
+      <p class="error-text" id="dom-error"></p>
+      <div id="dom-list"></div>
     </form>
   </dialog>
 

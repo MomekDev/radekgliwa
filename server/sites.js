@@ -5,6 +5,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import * as D from './db.js';
 import { safePath, mimeOf, escHtml, rateLimit, has, collectionRules } from './util.js';
+import { mountSitePayments } from './payments.js';
+import { projectForHost } from './domains.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,6 +18,17 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   // statyczne skrypty kreatora (SDK + mostek podglądu)
   app.use('/_kreator', express.static(path.join(here, '..', 'sites-static'), { maxAge: '5m' }));
 
+  // własna domena podłączona do projektu – serwuj opublikowaną stronę od korzenia
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/_api/') || req.path.startsWith('/_kreator/')) return next();
+    const pid = projectForHost(req.hostname);
+    if (!pid) return next();
+    if (req.method !== 'GET' && req.method !== 'HEAD') return res.sendStatus(405);
+    const p = D.getProject(pid);
+    if (!p?.published_files) return res.status(404).type('html').send(NOT_FOUND);
+    sendFile(req, res, { project: p, files: p.published_files, mode: 'published', base: '/' }, req.path.slice(1));
+  });
+
   // ---------- API backendu aplikacji ----------
   const api = express.Router();
   api.use((req, res, next) => {
@@ -26,6 +39,13 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });
+  const limited = (name, limit, windowMs) => (req, res, next) => {
+    if (!rateLimit(`${name}:${req.ip}:${req.pid}`, limit, windowMs)) return res.status(429).json({ error: 'Za dużo prób – spróbuj za chwilę' });
+    next();
+  };
+  // webhook Stripe potrzebuje surowego body – rejestrowany przed parserem JSON
+  const mountPaymentsAfterJson = mountSitePayments(api, { limited });
+
   api.use(express.json({ limit: '200kb' }));
   api.use((err, req, res, next) => res.status(400).json({ error: 'Nieprawidłowe dane JSON' }));
 
@@ -45,11 +65,6 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
     }
     next();
   });
-
-  const limited = (name, limit, windowMs) => (req, res, next) => {
-    if (!rateLimit(`${name}:${req.ip}:${req.pid}`, limit, windowMs)) return res.status(429).json({ error: 'Za dużo prób – spróbuj za chwilę' });
-    next();
-  };
 
   const userOut = (u) => ({ id: u.id, email: u.email, name: u.name });
   const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -86,6 +101,9 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   });
 
   api.get('/:pid/auth/me', (req, res) => res.json({ user: req.appUser || null }));
+
+  // --- płatności Stripe
+  mountPaymentsAfterJson();
 
   // --- kolekcje danych
   const RESERVED = new Set(['id', 'created_at', 'updated_at', 'owner_id']);

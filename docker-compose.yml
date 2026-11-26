@@ -1,3 +1,4 @@
+# Produkcja: kreator + Caddy (HTTPS). Lokalnie wystarczy: npm start
 services:
   kreator:
     build: .
@@ -5,10 +6,27 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /data
-    ports:
-      - "3000:3000"
-      - "3001:3001"
+      NODE_ENV: production
     volumes:
       - kreator-data:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    depends_on:
+      - kreator
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
 volumes:
   kreator-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,27 @@
+# Caddy: automatyczne HTTPS (Let's Encrypt) dla kreatora, stron użytkowników i ich własnych domen.
+# Zmienne ustawiasz w pliku .env (patrz README): KREATOR_DOMAIN, SITES_HOST.
+{
+	# certyfikat dla nieznanej domeny tylko, gdy kreator ją zna (zweryfikowana domena klienta / subdomena projektu)
+	on_demand_tls {
+		ask http://kreator:3000/_kreator/tls-allowed
+	}
+}
+
+# panel kreatora
+{$KREATOR_DOMAIN} {
+	encode gzip
+	reverse_proxy kreator:3000
+}
+
+# strony użytkowników: sites.twojadomena.pl, *.sites.twojadomena.pl i własne domeny klientów
+https:// {
+	tls {
+		on_demand
+	}
+	encode gzip
+	reverse_proxy kreator:3000
+}
+
+http:// {
+	redir https://{host}{uri} permanent
+}

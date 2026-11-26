@@ -131,3 +131,90 @@ test('backend aplikacji: reguły dostępu i własność rekordów', async () => 
   assert.deepEqual((await appApi(p.id, 'GET', 'db/wpisy?sort=n')).json.map((r) => r.n), [1, 2]);
   assert.equal((await appApi(p.id, 'DELETE', `db/wpisy/${g.id}`)).status, 403, 'rekordy anonimowe domyślnie tylko do odczytu');
 });
+
+test('płatności Stripe (fałszywe API Stripe) i własne domeny', async () => {
+  const http = await import('node:http');
+  // minimalny fałszywy Stripe
+  const sessions = {};
+  const fake = http.createServer((req, res) => {
+    let b = '';
+    req.on('data', (d) => (b += d));
+    req.on('end', () => {
+      const send = (c, j) => {
+        res.writeHead(c, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(j));
+      };
+      if (!String(req.headers.authorization).includes('sk_test_ok')) return send(401, { error: { message: 'Invalid API Key' } });
+      if (req.url === '/v1/balance') return send(200, {});
+      if (req.url === '/v1/checkout/sessions' && req.method === 'POST') {
+        const f = Object.fromEntries(new URLSearchParams(b));
+        const id = 'cs_test_' + Math.random().toString(36).slice(2, 12) + 'xyz';
+        sessions[id] = { id, object: 'checkout.session', mode: f.mode, status: 'complete', payment_status: 'paid', amount_total: Number(f['line_items[0][price_data][unit_amount]']) * Number(f['line_items[0][quantity]']), currency: 'pln', url: 'https://checkout.stripe.com/x', metadata: { kreator_project: f['metadata[kreator_project]'], kreator_items: f['metadata[kreator_items]'] } };
+        return send(200, sessions[id]);
+      }
+      const m = req.url.match(/^\/v1\/checkout\/sessions\/(cs_\w+)$/);
+      if (m && sessions[m[1]]) return send(200, sessions[m[1]]);
+      send(404, { error: { message: 'not found' } });
+    });
+  });
+  await new Promise((r) => fake.listen(0, r));
+  // osobny serwer kreatora wskazujący na fałszywy Stripe, z wyłączoną weryfikacją DNS
+  const port = PORT + 300;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kreator-pay-'));
+  const srv = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.js'], {
+    env: { ...process.env, DEMO: '1', PORT: String(port), DATA_DIR: dir, ANTHROPIC_API_KEY: '', STRIPE_API_BASE: `http://localhost:${fake.address().port}`, DOMAIN_VERIFY: 'off', DOMAIN_IP: '203.0.113.5' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 50; i++) {
+      try {
+        if ((await fetch(`http://localhost:${port}/healthz`)).ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    let cookie = '';
+    const c = async (method, url, body) => {
+      const res = await fetch(`http://localhost:${port}${url}`, { method, headers: { 'X-Kreator': '1', Cookie: cookie, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      const sc = res.headers.get('set-cookie');
+      if (sc) cookie = sc.split(';')[0];
+      return { status: res.status, json: await res.json().catch(() => null) };
+    };
+    await c('POST', '/api/auth/register', { email: 'pay@test.pl', password: 'haslo1234' });
+    const p = (await c('POST', '/api/projects', {})).json;
+    await c('PUT', `/api/projects/${p.id}/files`, { path: 'payments.json', content: JSON.stringify({ products: { a: { name: 'A', price: 1000 }, s: { name: 'S', price: 2000, interval: 'month' } } }) });
+    const A = `http://localhost:${port + 1}/_api/${p.id}/payments`;
+    const post = (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then(async (r) => ({ status: r.status, json: await r.json() }));
+    assert.equal((await post(`${A}/checkout`, { items: [{ id: 'a' }], successUrl: 'http://x/ok', cancelUrl: 'http://x/' })).status, 400, 'bez klucza');
+    assert.equal((await c('PUT', `/api/projects/${p.id}/payments`, { secretKey: 'sk_test_zly1234567890' })).status, 400);
+    assert.equal((await c('PUT', `/api/projects/${p.id}/payments`, { secretKey: 'sk_test_ok1234567890' })).json.configured, true);
+    assert.equal((await post(`${A}/checkout`, { items: [{ id: 'a' }, { id: 's' }], successUrl: 'http://x/ok', cancelUrl: 'http://x/' })).status, 400, 'mieszanie subskrypcji');
+    assert.equal((await post(`${A}/checkout`, { items: [{ id: 'nie-ma' }], successUrl: 'http://x/ok', cancelUrl: 'http://x/' })).status, 400, 'nieznany produkt');
+    const co = await post(`${A}/checkout`, { items: [{ id: 'a', quantity: 3, price: 1 }], successUrl: 'http://x/ok', cancelUrl: 'http://x/' });
+    assert.equal(co.status, 200);
+    const v = await (await fetch(`${A}/session/${co.json.id}`)).json();
+    assert.equal(v.paid, true);
+    assert.equal(v.amount, 3000, 'cena z payments.json, nie od klienta');
+    assert.equal((await c('GET', `/api/projects/${p.id}/payments`)).json.orders[0].status, 'paid');
+    // domeny
+    assert.equal((await c('POST', `/api/projects/${p.id}/domains`, { domain: 'zla domena' })).status, 400);
+    assert.equal((await c('POST', `/api/projects/${p.id}/domains`, { domain: 'https://Moja-Firma.pl/' })).status, 201);
+    assert.equal((await c('POST', `/api/projects/${p.id}/domains/moja-firma.pl/verify`)).json.ok, true);
+    await c('POST', '/api/projects/' + p.id + '/chat', { message: 'Strona' });
+    await fetch(`http://localhost:${port}/api/projects/${p.id}/stream`, { headers: { Cookie: cookie } }).then((r) => r.text());
+    await c('POST', `/api/projects/${p.id}/publish`);
+    const body = await new Promise((resolve) =>
+      http.get({ host: 'localhost', port, path: '/', headers: { Host: 'moja-firma.pl' } }, (r) => {
+        let d = '';
+        r.on('data', (x) => (d += x));
+        r.on('end', () => resolve(d));
+      })
+    );
+    assert.match(body, /_kreator\/sdk\.js/, 'strona serwowana pod własną domeną');
+    assert.equal((await fetch(`http://localhost:${port}/_kreator/tls-allowed?domain=moja-firma.pl`)).status, 200);
+    assert.equal((await fetch(`http://localhost:${port}/_kreator/tls-allowed?domain=obca.pl`)).status, 404);
+  } finally {
+    srv.kill();
+    fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
