@@ -649,7 +649,9 @@ function setGenerating(on) {
   S.generating = on;
   $('#btn-stop').hidden = !on;
   $('#btn-send').hidden = on;
-  $('#frame-overlay').hidden = !on;
+  const empty = !Object.keys(S.project?.files || {}).length;
+  $('#frame-overlay').hidden = !on || empty;
+  $('#frame-building').hidden = !on || !empty;
   for (const id of ['#btn-save-file', '#btn-delete-file', '#btn-rename-file', '#btn-new-file']) $(id).disabled = on;
   if (on) $('#error-banner').hidden = true;
 }

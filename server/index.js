@@ -332,9 +332,10 @@ app.post('/api/projects/:id/publish', withProject, (req, res) => {
   if (!p.files['index.html']) return res.status(400).json({ error: 'Projekt nie ma pliku index.html' });
   let slug = p.slug;
   if (!slug) {
-    const base = slugify(p.name) || 'strona';
+    // adres z pierwszych słów nazwy, bez wielokropka
+    const base = slugify(p.name.replace(/…$/, '').split(' ').slice(0, 4).join(' ')) || 'strona';
     slug = base.length >= 3 && !RESERVED_SLUGS.has(base) && !isHexId(base) ? base : `strona-${base}`.slice(0, 40);
-    for (let i = 0; D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id); i++) slug = `${slug.slice(0, 30)}-${D.newId(3)}`.slice(0, 40);
+    for (let i = 0; D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id); i++) slug = `${slug.slice(0, 30).replace(/-+$/, '')}-${D.newId(3)}`;
   }
   D.run('UPDATE projects SET published_files = ?, published_at = ?, slug = ? WHERE id = ?', JSON.stringify(p.files), Date.now(), slug, p.id);
   res.json(projectView(D.getProject(p.id), req));

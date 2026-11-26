@@ -61,6 +61,8 @@ export function parseResponse(text) {
     deletes.push(p);
     return '';
   });
+  chat = chat.replace(/<project-name>[\s\S]*?(<\/project-name>|$)/g, '');
+  chat = chat.replace(/<suggestion>[^<]*$/, '');
   chat = chat.replace(/<suggestion>([\s\S]*?)<\/suggestion>/g, (_, s) => {
     if (s.trim()) suggestions.push(s.trim());
     return '';

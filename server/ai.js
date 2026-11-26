@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import { parseResponse, applyHunks } from '../public/parser.js';
 import { mockResponse } from './mock.js';
 import * as D from './db.js';
-import { safePath } from './util.js';
+import { safePath, shortName } from './util.js';
 
 export const MODEL = process.env.MODEL || 'claude-opus-5-5';
 export const EFFORT = process.env.EFFORT || 'medium';
@@ -61,7 +61,8 @@ nowy fragment
 </edit>
    Fragment SEARCH musi być dosłowną kopią z aktualnego pliku. Przy dużych zmianach (ponad ~40% pliku) użyj <file>.
 4. Usunięcie pliku: <delete path="nazwa.js" />
-5. Na końcu krótkie podsumowanie zmian (lista punktów), a potem 2–3 propozycje kolejnych kroków, każda w osobnym znaczniku:
+5. W PIERWSZEJ odpowiedzi w projekcie (gdy projekt jest pusty) dodaj krótką nazwę projektu (2–4 słowa): <project-name>Kawiarnia Pod Lipą</project-name>
+6. Na końcu krótkie podsumowanie zmian (lista punktów), a potem 2–3 propozycje kolejnych kroków, każda w osobnym znaczniku:
 <suggestion>Dodaj formularz kontaktowy</suggestion>
 Zasady: nie używaj bloków \`\`\` wokół plików. Nie zostawiaj „...reszta bez zmian” w <file>. Jeśli użytkownik tylko o coś pyta, odpowiedz bez zmian w plikach.
 Gdy użytkownik zgłasza błędy z konsoli, znajdź przyczynę i napraw ją.
@@ -304,21 +305,24 @@ export function startJob(project, userId, req) {
     }
 
     try {
-    if (changed.length) {
-      meta.versionId = D.saveFiles(project.id, files, req.message.split('\n')[0]);
-      meta.changed = changed;
-    }
-    const parsed = parseResponse(job.text);
-    if (parsed.suggestions.length) meta.suggestions = parsed.suggestions.slice(0, 4);
-    meta.usage = usage;
-    D.updateMessage(job.messageId, job.text, meta);
-    if (usage.input || usage.output) {
-      D.run('INSERT INTO usage (user_id, project_id, input_tokens, output_tokens, ts) VALUES (?, ?, ?, ?, ?)', userId, project.id, usage.input, usage.output, Date.now());
-    }
-    // pierwsza wiadomość nadaje nazwę projektowi
-    const p = D.getProject(project.id);
-    if (p && p.name === 'Nowy projekt') D.run('UPDATE projects SET name = ? WHERE id = ?', req.message.split('\n')[0].slice(0, 50), project.id);
-    D.touchProject(project.id);
+      if (changed.length) {
+        meta.versionId = D.saveFiles(project.id, files, req.message.split('\n')[0]);
+        meta.changed = changed;
+      }
+      const parsed = parseResponse(job.text);
+      if (parsed.suggestions.length) meta.suggestions = parsed.suggestions.slice(0, 4);
+      meta.usage = usage;
+      D.updateMessage(job.messageId, job.text, meta);
+      if (usage.input || usage.output) {
+        D.run('INSERT INTO usage (user_id, project_id, input_tokens, output_tokens, ts) VALUES (?, ?, ?, ?, ?)', userId, project.id, usage.input, usage.output, Date.now());
+      }
+      // pierwsza wiadomość nadaje nazwę projektowi
+      const p = D.getProject(project.id);
+      if (p && p.name === 'Nowy projekt') {
+        const proposed = job.text.match(/<project-name>([^<]{2,80})<\/project-name>/)?.[1].trim();
+        D.run('UPDATE projects SET name = ? WHERE id = ?', proposed ? shortName(proposed, 60) : shortName(req.message), project.id);
+      }
+      D.touchProject(project.id);
     } catch (e) {
       console.error('[AI] zapis wyniku', e);
       meta.note = meta.note || 'Nie udało się zapisać wyniku generowania.';

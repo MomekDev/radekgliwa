@@ -110,6 +110,9 @@ for (const sql of [
 db.exec('UPDATE projects SET preview_key = lower(hex(randomblob(8))) WHERE preview_key IS NULL');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS projects_preview_key ON projects(preview_key)');
 
+// zadania AI nie przetrwają restartu – oznacz niedokończone odpowiedzi
+db.exec(`UPDATE messages SET meta = '{"note":"Generowanie przerwane (restart serwera). Wyślij prośbę ponownie."}' WHERE role = 'assistant' AND json_extract(meta, '$.status') = 'running'`);
+
 import { setRulesDb } from './util.js';
 
 export const newId = (bytes = 6) => crypto.randomBytes(bytes).toString('hex');

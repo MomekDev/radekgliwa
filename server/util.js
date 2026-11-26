@@ -29,7 +29,8 @@ export function slugify(s) {
     .replace(/ł/g, 'l')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 40);
+    .slice(0, 40)
+    .replace(/-+$/, '');
 }
 
 export const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -86,4 +87,13 @@ export function collectionRules(pid, coll) {
   const row = rulesDb.one(`SELECT json_extract(files, '$."${RULES_FILE}"') AS rules FROM projects WHERE id = ?`, pid);
   const all = parseRules(row?.rules);
   return normalizeRule(Object.hasOwn(all, coll) ? all[coll] : all['*']);
+}
+
+// krótka nazwa z dłuższego tekstu – ucięta na granicy słowa
+export function shortName(text, max = 40) {
+  const t = String(text).split('\n')[0].replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max + 1);
+  const i = cut.lastIndexOf(' ');
+  return (i > 15 ? cut.slice(0, i) : t.slice(0, max)).replace(/[\s,.;:–-]+$/, '') + '…';
 }

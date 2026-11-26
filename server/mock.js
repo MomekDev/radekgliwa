@@ -82,6 +82,7 @@ nic
 
 function newSite(title) {
   return `(Tryb demo – brak klucza API, więc to przykładowa aplikacja) Tworzę: ${title}. Księga gości zapisuje wpisy we wbudowanej bazie danych, a logowanie korzysta z wbudowanych kont.
+<project-name>${title.split(' ').slice(0, 4).join(' ')}</project-name>
 
 <file path="index.html">
 <!doctype html>
