@@ -164,6 +164,8 @@ function ask({ title, text = '', fields = [], okText = 'OK', danger = false, val
       (f) => `<label class="field">${esc(f.label || '')}${
         f.type === 'textarea'
           ? `<textarea class="input" name="${f.name}" rows="${f.rows || 10}" placeholder="${esc(f.placeholder || '')}">${esc(f.value || '')}</textarea>`
+          : f.type === 'select'
+          ? `<select class="input" name="${f.name}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${v === f.value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`
           : `<input class="input" name="${f.name}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}">`
       }</label>`
     )
@@ -1172,12 +1174,15 @@ async function renderDataView() {
   $$('#collections .file').forEach((b) => b.classList.toggle('active', v?.type === 'collection' && b.dataset.coll === v.name));
   $('[data-users]').classList.toggle('active', v?.type === 'users');
   if (!v) {
+    body.dataset.coll = '';
     $('#data-title').textContent = 'Baza danych';
     $('#data-sub').textContent = '';
     body.innerHTML = `<div class="data-empty"><p><b>Twoja aplikacja ma wbudowaną bazę danych.</b></p><p>Kolekcje pojawią się tu same, gdy strona zapisze dane – np. formularz kontaktowy, rezerwacje albo lista zadań.<br>Poproś w czacie: „zapisuj zgłoszenia z formularza w bazie danych”.</p><p>Możesz też utworzyć kolekcję ręcznie przyciskiem <b>+</b>.</p></div>`;
     return;
   }
   if (v.type === 'users') {
+    S.dataSeq = (S.dataSeq || 0) + 1;
+    body.dataset.coll = '';
     $('#data-title').textContent = 'Użytkownicy aplikacji';
     $('#data-sub').textContent = `${dataInfo.users.length} kont`;
     body.innerHTML = dataInfo.users.length
@@ -1188,16 +1193,23 @@ async function renderDataView() {
     return;
   }
   $('#data-title').textContent = v.name;
+  const coll = dataInfo.collections.find((c) => c.name === v.name);
   let rows;
+  const seq = (S.dataSeq = (S.dataSeq || 0) + 1);
+  if (!body.dataset.coll || body.dataset.coll !== v.name) body.innerHTML = '<div class="data-empty">Wczytywanie…</div>';
+  body.dataset.coll = v.name;
   try {
     rows = await api(`/api/projects/${S.project.id}/data/${encodeURIComponent(v.name)}`);
   } catch (err) {
     return toast(err.message, true);
   }
+  if (seq !== S.dataSeq || S.dataView !== v) return; // w międzyczasie wybrano inną kolekcję
   S.dataRows = rows;
   $('#data-sub').textContent = `${rows.length} rekordów`;
+  const r = coll?.rules || { read: 'public', write: 'public', edit: 'owner' };
+  const rulesBar = `<div class="rules-bar">${ic('users')}<span><b>Dostęp ze strony:</b> odczyt – ${esc(RULE_LABELS.read[r.read])} · dodawanie – ${esc(RULE_LABELS.write[r.write])} · edycja – ${esc(RULE_LABELS.edit[r.edit])}</span><button class="btn ghost small" id="btn-edit-rules">Zmień</button></div>`;
   if (!rows.length) {
-    body.innerHTML = '<div class="data-empty">Kolekcja jest pusta.</div>';
+    body.innerHTML = rulesBar + '<div class="data-empty">Kolekcja jest pusta.</div>';
     return;
   }
   const cols = [];
@@ -1207,12 +1219,46 @@ async function renderDataView() {
     const s = typeof val === 'object' ? JSON.stringify(val) : String(val);
     return `<span title="${esc(s.slice(0, 500))}">${esc(s.slice(0, 120))}</span>`;
   };
-  body.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}<th>Właściciel</th><th>Utworzono</th><th></th></tr></thead><tbody>${rows
+  body.innerHTML = rulesBar + `<div class="table-wrap"><table class="data"><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}<th>Właściciel</th><th>Utworzono</th><th></th></tr></thead><tbody>${rows
     .map(
       (r) =>
         `<tr>${cols.map((c) => `<td>${cell(r.data[c])}</td>`).join('')}<td>${r.owner_id ? esc(dataInfo.users.find((u) => u.id === r.owner_id)?.email || r.owner_id) : '<span class="muted">anonim</span>'}</td><td>${fmtDate(r.created_at)}</td><td class="actions"><button class="btn ghost small" data-edit-rec="${r.id}">Edytuj</button><button class="btn ghost small danger-text" data-del-rec="${r.id}">Usuń</button></td></tr>`
     )
     .join('')}</tbody></table></div>`;
+}
+
+const RULE_LABELS = {
+  read: { public: 'każdy', auth: 'zalogowani', owner: 'tylko własne rekordy', private: 'nikt (tylko Ty w panelu)' },
+  write: { public: 'każdy', auth: 'zalogowani', none: 'nikt' },
+  edit: { owner: 'tylko autor', public: 'każdy (rekordy anonimowe)' },
+};
+async function editRules(name) {
+  const coll = dataInfo.collections.find((c) => c.name === name);
+  const cur = coll?.rules || { read: 'public', write: 'public', edit: 'owner' };
+  const opts = (k) => Object.entries(RULE_LABELS[k]);
+  const v = await ask({
+    title: `Dostęp do „${name}”`,
+    text: 'Kto może korzystać z tej kolekcji na Twojej stronie. Ty w panelu zawsze masz pełny dostęp.',
+    fields: [
+      { name: 'read', label: 'Kto może czytać rekordy', type: 'select', value: cur.read, options: opts('read') },
+      { name: 'write', label: 'Kto może dodawać rekordy', type: 'select', value: cur.write, options: opts('write') },
+      { name: 'edit', label: 'Kto może zmieniać i usuwać rekordy bez autora', type: 'select', value: cur.edit, options: opts('edit') },
+    ],
+    okText: 'Zapisz',
+  });
+  if (!v) return;
+  let all = {};
+  try {
+    all = JSON.parse(S.project.files['database.rules.json'] || '{}') || {};
+  } catch {}
+  all[name] = { read: v.read, write: v.write, edit: v.edit };
+  try {
+    S.project = await api(`/api/projects/${S.project.id}/files`, { method: 'PUT', body: { path: 'database.rules.json', content: JSON.stringify(all, null, 2) + '\n' } });
+    renderAll();
+    toast('Zapisano reguły dostępu');
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 const jsonField = (value) => [{ name: 'json', type: 'textarea', value, rows: 12 }];
@@ -1276,6 +1322,7 @@ $('#btn-drop-collection').onclick = async () => {
   }
 };
 $('#data-body').addEventListener('click', async (e) => {
+  if (e.target.closest('#btn-edit-rules')) return editRules(S.dataView.name);
   const edit = e.target.closest('[data-edit-rec]');
   const del = e.target.closest('[data-del-rec]');
   const delUser = e.target.closest('[data-del-user]');

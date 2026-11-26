@@ -2,7 +2,10 @@ export function safePath(p) {
   p = String(p || '').replace(/\\/g, '/').replace(/^(\.\/|\/)+/, '').trim();
   if (!p || p.length > 200) return null;
   if (!/^[\w.\-/ ]+$/.test(p)) return null;
-  if (p.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  const parts = p.split('/');
+  if (parts.some((s) => s === '' || s === '.' || s === '..' || s.startsWith('.'))) return null;
+  // nazwa pliku musi mieć rozszerzenie – blokuje też klucze typu "toString" czy "__proto__"
+  if (!/^[^.]+.*\.[A-Za-z0-9]{1,8}$/.test(parts[parts.length - 1])) return null;
   return p;
 }
 
@@ -13,6 +16,8 @@ export const MIME = {
   mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', woff: 'font/woff', woff2: 'font/woff2', pdf: 'application/pdf',
 };
 export const mimeOf = (name) => MIME[String(name).split('.').pop().toLowerCase()] || 'application/octet-stream';
+
+export const has = (obj, key) => obj != null && Object.hasOwn(obj, key);
 
 export const TEXT_EXT = /\.(html?|css|m?js|json|svg|txt|xml|md)$/i;
 
@@ -46,3 +51,39 @@ setInterval(() => {
   const now = Date.now();
   for (const [k, arr] of buckets) if (!arr.some((t) => now - t < 3600_000)) buckets.delete(k);
 }, 600_000).unref();
+
+// ---------- reguły dostępu do danych aplikacji ----------
+// Plik "database.rules.json" w projekcie, np.:
+// { "kontakt": { "read": "private", "write": "public" }, "zadania": { "read": "owner", "write": "auth" } }
+//   read:  public (każdy) | auth (zalogowani) | owner (tylko własne rekordy) | private (nikt – tylko właściciel w panelu)
+//   write: public (każdy może dodać) | auth (tylko zalogowani) | none (nikt)
+//   edit:  owner (rekordy anonimowe są tylko do odczytu) | public (każdy może zmieniać/usuwać rekordy anonimowe)
+export const RULES_FILE = 'database.rules.json';
+export const DEFAULT_RULES = { read: 'public', write: 'public', edit: 'owner' };
+const ALLOWED = { read: ['public', 'auth', 'owner', 'private'], write: ['public', 'auth', 'none'], edit: ['owner', 'public'] };
+
+export function parseRules(text) {
+  let obj;
+  try {
+    obj = JSON.parse(text || '{}');
+  } catch {
+    return {};
+  }
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+}
+
+export function normalizeRule(r) {
+  const out = { ...DEFAULT_RULES };
+  if (r && typeof r === 'object') for (const k of Object.keys(ALLOWED)) if (ALLOWED[k].includes(r[k])) out[k] = r[k];
+  return out;
+}
+
+let rulesDb = null;
+export function setRulesDb(D) {
+  rulesDb = D;
+}
+export function collectionRules(pid, coll) {
+  const row = rulesDb.one(`SELECT json_extract(files, '$."${RULES_FILE}"') AS rules FROM projects WHERE id = ?`, pid);
+  const all = parseRules(row?.rules);
+  return normalizeRule(Object.hasOwn(all, coll) ? all[coll] : all['*']);
+}

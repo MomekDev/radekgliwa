@@ -98,11 +98,19 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 `);
 
 // migracje
-for (const sql of ["ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''"]) {
+for (const sql of [
+  "ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE projects ADD COLUMN preview_key TEXT',
+]) {
   try {
     db.exec(sql);
   } catch {}
 }
+
+db.exec('UPDATE projects SET preview_key = lower(hex(randomblob(8))) WHERE preview_key IS NULL');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS projects_preview_key ON projects(preview_key)');
+
+import { setRulesDb } from './util.js';
 
 export const newId = (bytes = 6) => crypto.randomBytes(bytes).toString('hex');
 export const newToken = () => crypto.randomBytes(32).toString('base64url');
@@ -191,3 +199,5 @@ export function cleanupSessions() {
   run('DELETE FROM sessions WHERE expires_at < ?', now);
   run('DELETE FROM app_sessions WHERE expires_at < ?', now);
 }
+
+setRulesDb({ one });

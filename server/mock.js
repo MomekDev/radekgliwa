@@ -122,6 +122,13 @@ function newSite(title) {
 </html>
 </file>
 
+<file path="database.rules.json">
+{
+  "guestbook": { "read": "public", "write": "public" },
+  "kontakt": { "read": "private", "write": "public" }
+}
+</file>
+
 <file path="style.css">
 body { margin: 0; font-family: system-ui, sans-serif; background: #f6f7fb; color: #1d1d1f; }
 .hero { padding: 64px 24px; text-align: center; background: linear-gradient(135deg, #6366f1, #ec4899); color: #fff; }

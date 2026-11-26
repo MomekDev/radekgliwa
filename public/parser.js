@@ -40,7 +40,13 @@ export function parseResponse(text) {
     const kind = m[1];
     const start = m.index + m[0].length;
     const closeTag = `</${kind}>`;
-    const end = text.indexOf(closeTag, start);
+    // znacznik zamykający liczy się tylko na początku linii (np. "</file>" w stringu JS nie ucina pliku)
+    const closeRe = new RegExp(`(^|\\n)</${kind}>`, 'g');
+    closeRe.lastIndex = start;
+    const cm = closeRe.exec(text);
+    let end = text.startsWith(closeTag, start) ? start : cm ? cm.index + cm[1].length : -1;
+    // zapas: znacznik zamykający w tej samej linii co kod (np. "}</file>")
+    if (end === -1) end = text.indexOf(closeTag, start);
     const body = end === -1 ? text.slice(start) : text.slice(start, end);
     const complete = end !== -1;
     if (kind === 'file') blocks.push({ kind, path: m[2], content: complete ? stripFence(body) : body, complete });
@@ -75,6 +81,11 @@ export function applyHunks(content, hunks) {
     }
     const idx = content.indexOf(h.search);
     if (idx !== -1) {
+      // fragment musi być jednoznaczny – inaczej zmiana mogłaby trafić w złe miejsce
+      if (content.indexOf(h.search, idx + 1) !== -1) {
+        failed.push({ ...h, reason: 'niejednoznaczny' });
+        continue;
+      }
       content = content.slice(0, idx) + h.replace + content.slice(idx + h.search.length);
       continue;
     }
@@ -83,26 +94,32 @@ export function applyHunks(content, hunks) {
     const sLines = h.search.split('\n');
     while (sLines.length && !sLines[sLines.length - 1].trim()) sLines.pop();
     while (sLines.length && !sLines[0].trim()) sLines.shift();
-    const norm = (s) => s.trim();
-    let found = -1;
+    const matches = [];
     for (let i = 0; i + sLines.length <= lines.length && sLines.length; i++) {
       let ok = true;
       for (let j = 0; j < sLines.length; j++) {
-        if (norm(lines[i + j]) !== norm(sLines[j])) {
+        if (lines[i + j].trim() !== sLines[j].trim()) {
           ok = false;
           break;
         }
       }
-      if (ok) {
-        found = i;
-        break;
-      }
+      if (ok) matches.push(i);
     }
-    if (found === -1) {
+    if (matches.length !== 1) {
       failed.push(h);
       continue;
     }
-    lines.splice(found, sLines.length, ...h.replace.split('\n'));
+    const found = matches[0];
+    // przenieś różnicę wcięcia z dopasowanego miejsca na nowy fragment
+    const indentOf = (l) => l.match(/^\s*/)[0];
+    const fileIndent = indentOf(lines[found]);
+    const searchIndent = indentOf(sLines[0]);
+    const rLines = h.replace.split('\n').map((l) => {
+      if (!l.trim()) return l;
+      if (searchIndent && l.startsWith(searchIndent)) return fileIndent + l.slice(searchIndent.length);
+      return searchIndent ? l : fileIndent + l;
+    });
+    lines.splice(found, sLines.length, ...rLines);
     content = lines.join('\n');
   }
   return { content, failed };

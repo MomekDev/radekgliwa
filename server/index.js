@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as D from './db.js';
-import { safePath, slugify, rateLimit, mimeOf, TEXT_EXT } from './util.js';
+import { safePath, slugify, rateLimit, mimeOf, TEXT_EXT, has, RULES_FILE, parseRules, normalizeRule } from './util.js';
 import { startJob, getJob, stopJob, DEMO, MODEL } from './ai.js';
 import { createSitesApp } from './sites.js';
 
@@ -34,10 +34,10 @@ function sitesUrl(req) {
 function siteUrls(req, p) {
   if (WILDCARD) {
     const proto = process.env.SITES_PROTOCOL || req.protocol;
-    return { preview: `${proto}://${p.id}.${WILDCARD}/`, published: p.slug ? `${proto}://${p.slug}.${WILDCARD}/` : null };
+    return { preview: `${proto}://${p.preview_key}.${WILDCARD}/`, published: p.slug ? `${proto}://${p.slug}.${WILDCARD}/` : null };
   }
   const base = sitesUrl(req);
-  return { preview: `${base}/preview/${p.id}/`, published: p.slug ? `${base}/s/${p.slug}/` : `${base}/p/${p.id}/` };
+  return { preview: `${base}/preview/${p.preview_key}/`, published: p.slug ? `${base}/s/${p.slug}/` : `${base}/p/${p.id}/` };
 }
 
 const app = express();
@@ -67,7 +67,7 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   // wymuszamy własny nagłówek przy zmianach – przeglądarka nie pozwoli go wysłać obcej stronie bez CORS
   if (req.method !== 'GET' && req.get('X-Kreator') !== '1') return res.status(403).json({ error: 'Brak nagłówka X-Kreator' });
-  const token = getCookie(req, 'sid');
+  const token = getCookie(req, COOKIE);
   if (token) {
     const u = D.one('SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?', token, Date.now());
     if (u) req.user = { ...u };
@@ -75,13 +75,15 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+const COOKIE = SECURE_COOKIES ? '__Host-sid' : 'sid';
 function setSessionCookie(req, res, userId) {
   const token = D.newToken();
   const maxAge = 30 * 86400;
   D.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', token, userId, Date.now() + maxAge * 1000);
-  res.set('Set-Cookie', `sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure || SECURE_COOKIES ? '; Secure' : ''}`);
+  res.set('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure || SECURE_COOKIES ? '; Secure' : ''}`);
 }
 
+const DUMMY_HASH = D.hashPassword('nie-istnieje-' + D.newToken());
 const userOut = (u) => ({ id: u.id, email: u.email, name: u.name });
 
 // ---------- konta ----------
@@ -108,15 +110,16 @@ app.post('/api/auth/login', (req, res) => {
   if (!rateLimit(`login:${req.ip}`, 20, 600_000)) return res.status(429).json({ error: 'Za dużo prób – spróbuj za kilka minut' });
   const email = String(req.body?.email || '').trim().toLowerCase();
   const u = D.one('SELECT * FROM users WHERE email = ?', email);
-  if (!u || !D.verifyPassword(String(req.body?.password || ''), u.pass_hash)) return res.status(401).json({ error: 'Nieprawidłowy e-mail lub hasło' });
+  const okPass = D.verifyPassword(String(req.body?.password || ''), u ? u.pass_hash : DUMMY_HASH);
+  if (!u || !okPass) return res.status(401).json({ error: 'Nieprawidłowy e-mail lub hasło' });
   setSessionCookie(req, res, u.id);
   res.json({ user: userOut(u) });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  const token = getCookie(req, 'sid');
+  const token = getCookie(req, COOKIE);
   if (token) D.run('DELETE FROM sessions WHERE token = ?', token);
-  res.set('Set-Cookie', 'sid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.set('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${SECURE_COOKIES ? '; Secure' : ''}`);
   res.json({ ok: true });
 });
 
@@ -128,6 +131,7 @@ app.patch('/api/auth/me', requireUser, (req, res) => {
     if (!D.verifyPassword(String(req.body.currentPassword || ''), u.pass_hash)) return res.status(400).json({ error: 'Obecne hasło jest nieprawidłowe' });
     if (String(req.body.newPassword).length < 8) return res.status(400).json({ error: 'Nowe hasło musi mieć co najmniej 8 znaków' });
     D.run('UPDATE users SET pass_hash = ? WHERE id = ?', D.hashPassword(String(req.body.newPassword)), req.user.id);
+    D.run('DELETE FROM sessions WHERE user_id = ? AND token != ?', req.user.id, getCookie(req, COOKIE) || '');
   }
   res.json({ user: userOut(D.one('SELECT * FROM users WHERE id = ?', req.user.id)) });
 });
@@ -143,7 +147,14 @@ app.get('/api/usage', requireUser, (req, res) => {
   res.json({ total, month });
 });
 
+// treść odpowiedzi AI bez zawartości plików (interfejs potrzebuje tylko opisu i listy plików)
+function stripBodies(text) {
+  return String(text).replace(/(<(file|edit)\s+path="[^"]+"\s*>)[\s\S]*?(^|\n)(<\/\2>)/g, '$1\n$4');
+}
+
 // ---------- projekty ----------
+const MAX_PROJECTS = Number(process.env.MAX_PROJECTS || 100);
+const isHexId = (s) => /^[a-f0-9]{12}([a-f0-9]{4})?$/.test(s);
 const RESERVED_SLUGS = new Set(['www', 'api', 'app', 'admin', 'mail', 'static', 'assets', 'preview', 'sites']);
 function projectView(p, req) {
   const urls = siteUrls(req, p);
@@ -155,7 +166,7 @@ function projectView(p, req) {
     updatedAt: p.updated_at,
     files: p.files,
     assets: D.listAssets(p.id),
-    messages: D.getMessages(p.id),
+    messages: D.getMessages(p.id).map((m) => (m.role === 'assistant' && m.meta?.status !== 'running' ? { ...m, content: stripBodies(m.content) } : m)),
     versions: D.all('SELECT id, label, ts FROM versions WHERE project_id = ? ORDER BY ts', p.id),
     instructions: p.instructions || '',
     previewUrl: urls.preview,
@@ -180,14 +191,14 @@ function notBusy(req, res, next) {
 }
 
 app.get('/api/projects', requireUser, (req, res) => {
-  const rows = D.all('SELECT id, name, slug, files, published_at, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC', req.user.id);
+  const rows = D.all('SELECT id, name, slug, preview_key, files != \'{}\' AS has_files, published_at, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC', req.user.id);
   res.json(
     rows.map((p) => ({
       id: p.id,
       name: p.name,
       updatedAt: p.updated_at,
       createdAt: p.created_at,
-      hasFiles: p.files !== '{}',
+      hasFiles: !!p.has_files,
       published: !!p.published_at,
       previewUrl: siteUrls(req, p).preview,
       generating: !!getJob(p.id),
@@ -198,7 +209,8 @@ app.get('/api/projects', requireUser, (req, res) => {
 app.post('/api/projects', requireUser, (req, res) => {
   const now = Date.now();
   const id = D.newId();
-  D.run('INSERT INTO projects (id, user_id, name, files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', id, req.user.id, String(req.body?.name || 'Nowy projekt').slice(0, 80), '{}', now, now);
+  if (D.one('SELECT COUNT(*) AS n FROM projects WHERE user_id = ?', req.user.id).n >= MAX_PROJECTS) return res.status(403).json({ error: `Osiągnięto limit ${MAX_PROJECTS} projektów – usuń niepotrzebne` });
+  D.run('INSERT INTO projects (id, user_id, name, files, preview_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', id, req.user.id, String(req.body?.name || 'Nowy projekt').slice(0, 80), '{}', D.newId(8), now, now);
   res.status(201).json(projectView(D.getProject(id), req));
 });
 
@@ -217,7 +229,7 @@ app.patch('/api/projects/:id', withProject, (req, res) => {
   if (req.body?.slug !== undefined) {
     const slug = req.body.slug ? slugify(req.body.slug) : null;
     if (slug !== null && slug.length < 3) return res.status(400).json({ error: 'Adres musi mieć co najmniej 3 znaki (litery, cyfry, myślniki)' });
-    if (slug && (/^[a-f0-9]{12}$/.test(slug) || RESERVED_SLUGS.has(slug))) return res.status(400).json({ error: 'Ten adres jest zarezerwowany – wybierz inny' });
+    if (slug && (isHexId(slug) || RESERVED_SLUGS.has(slug))) return res.status(400).json({ error: 'Ten adres jest zarezerwowany – wybierz inny' });
     if (slug && D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) return res.status(409).json({ error: 'Ten adres jest już zajęty' });
     D.run('UPDATE projects SET slug = ? WHERE id = ?', slug, p.id);
   }
@@ -232,10 +244,11 @@ app.delete('/api/projects/:id', withProject, notBusy, (req, res) => {
 
 app.post('/api/projects/:id/duplicate', withProject, (req, res) => {
   const src = req.project;
+  if (D.one('SELECT COUNT(*) AS n FROM projects WHERE user_id = ?', req.user.id).n >= MAX_PROJECTS) return res.status(403).json({ error: `Osiągnięto limit ${MAX_PROJECTS} projektów – usuń niepotrzebne` });
   const id = D.newId();
   const now = Date.now();
   D.tx(() => {
-    D.run('INSERT INTO projects (id, user_id, name, files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', id, req.user.id, `${src.name} (kopia)`.slice(0, 80), JSON.stringify(src.files), now, now);
+    D.run('INSERT INTO projects (id, user_id, name, files, instructions, preview_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, req.user.id, `${src.name} (kopia)`.slice(0, 80), JSON.stringify(src.files), src.instructions || '', D.newId(8), now, now);
     D.run('INSERT INTO assets (project_id, name, mime, data, size, ts) SELECT ?, name, mime, data, size, ts FROM assets WHERE project_id = ?', id, src.id);
     D.run('INSERT INTO versions (id, project_id, label, files, ts) VALUES (?, ?, ?, ?, ?)', D.newId(), id, `Kopia projektu „${src.name}”`, JSON.stringify(src.files), now);
   });
@@ -250,7 +263,7 @@ app.put('/api/projects/:id/files', withProject, notBusy, (req, res) => {
   if (fp.startsWith('assets/') && D.one('SELECT 1 FROM assets WHERE project_id = ? AND name = ?', p.id, fp)) return res.status(409).json({ error: 'Istnieje już wgrany plik o tej nazwie' });
   const content = String(req.body?.content ?? '');
   if (content.length > 2_000_000) return res.status(413).json({ error: 'Plik jest za duży' });
-  const isNew = !(fp in p.files);
+  const isNew = !has(p.files, fp);
   if (!isNew && p.files[fp] === content) return res.json(projectView(p, req));
   D.saveFiles(p.id, { ...p.files, [fp]: content }, isNew ? `Nowy plik: ${fp}` : `Ręczna edycja: ${fp}`);
   res.json(projectView(D.getProject(p.id), req));
@@ -260,9 +273,9 @@ app.post('/api/projects/:id/files/rename', withProject, notBusy, (req, res) => {
   const p = req.project;
   const from = safePath(req.body?.from);
   const to = safePath(req.body?.to);
-  if (!from || !(from in p.files)) return res.status(404).json({ error: 'Brak pliku' });
+  if (!from || !has(p.files, from)) return res.status(404).json({ error: 'Brak pliku' });
   if (!to || !TEXT_EXT.test(to)) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
-  if (to in p.files) return res.status(409).json({ error: 'Plik o tej nazwie już istnieje' });
+  if (has(p.files, to)) return res.status(409).json({ error: 'Plik o tej nazwie już istnieje' });
   const files = { ...p.files, [to]: p.files[from] };
   delete files[from];
   D.saveFiles(p.id, files, `Zmiana nazwy: ${from} → ${to}`);
@@ -272,7 +285,7 @@ app.post('/api/projects/:id/files/rename', withProject, notBusy, (req, res) => {
 app.delete('/api/projects/:id/files', withProject, notBusy, (req, res) => {
   const p = req.project;
   const fp = safePath(req.query.path);
-  if (!fp || !(fp in p.files)) return res.status(404).json({ error: 'Brak pliku' });
+  if (!fp || !has(p.files, fp)) return res.status(404).json({ error: 'Brak pliku' });
   const files = { ...p.files };
   delete files[fp];
   D.saveFiles(p.id, files, `Usunięto plik: ${fp}`);
@@ -288,6 +301,7 @@ app.post('/api/projects/:id/assets', withProject, (req, res) => {
   name = safePath('assets/' + name);
   const mime = mimeOf(name);
   if (!name || !ASSET_MIME.test(mime)) return res.status(400).json({ error: 'Dozwolone: obrazy, wideo MP4/WEBM, MP3, czcionki WOFF, PDF' });
+  if (has(p.files, name)) return res.status(409).json({ error: 'W projekcie jest już plik o tej nazwie' });
   const data = Buffer.from(String(req.body?.data || ''), 'base64');
   if (!data.length) return res.status(400).json({ error: 'Pusty plik' });
   if (data.length > 10 * 1024 * 1024) return res.status(413).json({ error: 'Maksymalny rozmiar pliku to 10 MB' });
@@ -319,8 +333,8 @@ app.post('/api/projects/:id/publish', withProject, (req, res) => {
   let slug = p.slug;
   if (!slug) {
     const base = slugify(p.name) || 'strona';
-    slug = base.length >= 3 && !RESERVED_SLUGS.has(base) && !/^[a-f0-9]{12}$/.test(base) ? base : `strona-${base}`.slice(0, 40);
-    if (D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) slug = `${slug.slice(0, 33)}-${p.id.slice(0, 6)}`;
+    slug = base.length >= 3 && !RESERVED_SLUGS.has(base) && !isHexId(base) ? base : `strona-${base}`.slice(0, 40);
+    for (let i = 0; D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id); i++) slug = `${slug.slice(0, 30)}-${D.newId(3)}`.slice(0, 40);
   }
   D.run('UPDATE projects SET published_files = ?, published_at = ?, slug = ? WHERE id = ?', JSON.stringify(p.files), Date.now(), slug, p.id);
   res.json(projectView(D.getProject(p.id), req));
@@ -412,8 +426,13 @@ const recordOut = (r) => ({ id: r.id, owner_id: r.owner_id, created_at: r.create
 
 app.get('/api/projects/:id/data', withProject, (req, res) => {
   const pid = req.project.id;
+  const allRules = parseRules(req.project.files[RULES_FILE]);
+  const cols = D.all('SELECT collection AS name, COUNT(*) AS count FROM app_records WHERE project_id = ? GROUP BY collection', pid);
+  for (const name of Object.keys(allRules)) if (name !== '*' && /^[A-Za-z][\w-]{0,49}$/.test(name) && !cols.some((c) => c.name === name)) cols.push({ name, count: 0 });
+  cols.sort((a, b) => a.name.localeCompare(b.name));
+  for (const c of cols) c.rules = normalizeRule(Object.hasOwn(allRules, c.name) ? allRules[c.name] : allRules['*']);
   res.json({
-    collections: D.all('SELECT collection AS name, COUNT(*) AS count FROM app_records WHERE project_id = ? GROUP BY collection ORDER BY collection', pid),
+    collections: cols,
     users: D.all('SELECT id, email, name, created_at FROM app_users WHERE project_id = ? ORDER BY created_at DESC', pid),
   });
 });
@@ -471,6 +490,9 @@ if (SITES_MODE === 'same') {
 
 app.listen(PORT, () => {
   console.log(`Kreator: http://localhost:${PORT}  (${DEMO ? 'TRYB DEMO – bez AI' : `AI: ${MODEL}`})`);
+  if (!WILDCARD && ALLOW_SIGNUP && process.env.NODE_ENV === 'production') {
+    console.warn('UWAGA: strony wszystkich użytkowników działają na wspólnym adresie. Jeśli kreator jest publiczny, ustaw SITES_HOST + SITES_WILDCARD=1 (patrz README), albo ALLOW_SIGNUP=0.');
+  }
 });
 
 if (SITES_MODE === 'port') {

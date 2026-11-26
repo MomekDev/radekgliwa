@@ -32,7 +32,16 @@ Używaj go zawsze, gdy aplikacja ma zapisywać dane (formularze, listy, rezerwac
   await app.auth.signUp({ email, password, name }); await app.auth.signIn({ email, password }); await app.auth.signOut();
   app.auth.user();            // aktualny użytkownik {id, email, name} lub null (synchronicznie)
   app.auth.onChange(user => { ... });  // wywoływane od razu i przy każdej zmianie
-- Rekordy utworzone przez zalogowanego użytkownika należą do niego – tylko on może je zmienić/usunąć. Rekordy anonimowe może zmienić każdy.
+- UPRAWNIENIA: każdą kolekcję opisz w pliku database.rules.json (zawsze go twórz/aktualizuj, gdy używasz bazy), np.:
+  { "kontakt": { "read": "private", "write": "public" },
+    "zadania": { "read": "owner", "write": "auth" },
+    "posty":   { "read": "public", "write": "auth" },
+    "notatki": { "read": "public", "write": "public", "edit": "public" } }
+  read: public (każdy czyta) | auth (tylko zalogowani) | owner (każdy widzi tylko swoje rekordy) | private (nikt przez stronę – tylko właściciel w panelu kreatora)
+  write: public (każdy może dodać) | auth (tylko zalogowani) | none
+  edit: owner (domyślnie: rekord zalogowanego zmienia tylko on, rekordy anonimowe są tylko do odczytu) | public (każdy może zmieniać i usuwać rekordy anonimowe – np. prosta lista bez logowania)
+  Dane osobowe z formularzy (kontakt, zgłoszenia, rezerwacje, zamówienia) ZAWSZE jako "read": "private" – strona tylko je zapisuje i nie wyświetla.
+  Domyślnie (bez wpisu) kolekcja ma read: public, write: public, edit: owner. Odmowa dostępu rzuca Error – obsłuż to w interfejsie.
 - Wszystkie metody są asynchroniczne i rzucają Error z polskim komunikatem – obsłuż błędy (try/catch) i pokaż je użytkownikowi.
 - Hasło musi mieć min. 6 znaków. Daty created_at/updated_at to liczby (ms).
 
@@ -155,7 +164,7 @@ function mockRepair(failedPaths) {
 // ---------- zastosowanie zmian ----------
 export function applyResponse(files, raw) {
   const parsed = parseResponse(raw);
-  const next = { ...files };
+  const next = Object.assign(Object.create(null), files);
   const changed = new Set();
   const failed = [];
   for (const b of parsed.blocks) {
@@ -165,7 +174,7 @@ export function applyResponse(files, raw) {
       next[fp] = b.content;
       changed.add(fp);
     } else {
-      if (!(fp in next)) {
+      if (!Object.hasOwn(next, fp)) {
         failed.push({ path: fp, reason: 'plik nie istnieje' });
         continue;
       }
@@ -177,12 +186,12 @@ export function applyResponse(files, raw) {
   }
   for (const d of parsed.deletes) {
     const fp = safePath(d);
-    if (fp && fp in next) {
+    if (fp && Object.hasOwn(next, fp)) {
       delete next[fp];
       changed.add(fp);
     }
   }
-  return { files: next, changed: [...changed], failed, parsed };
+  return { files: { ...next }, changed: [...changed], failed, parsed };
 }
 
 // ---------- zadania ----------
@@ -263,7 +272,7 @@ export function startJob(project, userId, req) {
             {
               role: 'user',
               content: `Część edycji się nie zastosowała (${r.failed.map((f) => `${f.path}: ${f.reason}`).join('; ')}). Aktualny stan plików po udanych zmianach:\n\n${paths
-                .filter((p) => p in files)
+                .filter((p) => Object.hasOwn(files, p))
                 .map((p) => `<file path="${p}">\n${files[p]}\n</file>`)
                 .join('\n\n')}\n\nPodaj PEŁNĄ poprawioną zawartość tych plików w blokach <file> (bez <edit>), uwzględniając zamierzone zmiany. Bez dodatkowych wyjaśnień poza jednym zdaniem.`,
             },
@@ -284,12 +293,17 @@ export function startJob(project, userId, req) {
       if (!aborted) console.error('[AI]', err);
       // przy przerwaniu zachowaj kompletne pliki, które już powstały
       if (req.mode !== 'chat' && job.text) {
-        const r = applyResponse(project.files, job.text);
-        files = r.files;
-        changed = r.changed;
+        try {
+          const r = applyResponse(project.files, job.text);
+          files = r.files;
+          changed = r.changed;
+        } catch (e) {
+          console.error('[AI] applyResponse', e);
+        }
       }
     }
 
+    try {
     if (changed.length) {
       meta.versionId = D.saveFiles(project.id, files, req.message.split('\n')[0]);
       meta.changed = changed;
@@ -305,9 +319,24 @@ export function startJob(project, userId, req) {
     const p = D.getProject(project.id);
     if (p && p.name === 'Nowy projekt') D.run('UPDATE projects SET name = ? WHERE id = ?', req.message.split('\n')[0].slice(0, 50), project.id);
     D.touchProject(project.id);
+    } catch (e) {
+      console.error('[AI] zapis wyniku', e);
+      meta.note = meta.note || 'Nie udało się zapisać wyniku generowania.';
+      try {
+        D.updateMessage(job.messageId, job.text, { note: meta.note });
+      } catch {}
+    } finally {
+      jobs.delete(project.id);
+      try {
+        job.emit('done', { changed, note: meta.note || null });
+      } catch (e) {
+        console.error('[AI] done listener', e);
+      }
+    }
+  })().catch((e) => {
+    console.error('[AI] nieoczekiwany błąd zadania', e);
     jobs.delete(project.id);
-    job.emit('done', { changed, note: meta.note || null });
-  })();
+  });
 
   return job;
 }

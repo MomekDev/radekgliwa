@@ -4,7 +4,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as D from './db.js';
-import { safePath, mimeOf, escHtml, rateLimit } from './util.js';
+import { safePath, mimeOf, escHtml, rateLimit, has, collectionRules } from './util.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -90,6 +90,7 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   // --- kolekcje danych
   const RESERVED = new Set(['id', 'created_at', 'updated_at', 'owner_id']);
   const validColl = (c) => /^[A-Za-z][\w-]{0,49}$/.test(c);
+  const validKey = (k) => /^[A-Za-z_][\w-]{0,49}$/.test(k);
   const recordOut = (r) => ({ ...JSON.parse(r.data), id: r.id, created_at: r.created_at, updated_at: r.updated_at, owner_id: r.owner_id });
   const cleanData = (body) => {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
@@ -98,16 +99,36 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
     return out;
   };
   const MAX_RECORDS = Number(process.env.APP_MAX_RECORDS || 20000);
+  const MAX_BYTES = Number(process.env.APP_MAX_BYTES || 50 * 1024 * 1024);
+  const DENIED = { error: 'Brak uprawnień do tej kolekcji' };
 
+  // reguły dostępu – plik database.rules.json w projekcie
   api.use('/:pid/db/:coll', (req, res, next) => {
     if (!validColl(req.params.coll)) return res.status(400).json({ error: 'Nieprawidłowa nazwa kolekcji' });
+    req.rules = collectionRules(req.pid, req.params.coll);
     next();
   });
 
+  // czy bieżący użytkownik może czytać rekord / jaki filtr właściciela nałożyć
+  function readFilter(req) {
+    const { read } = req.rules;
+    if (read === 'private') return { denied: true };
+    if (read === 'auth' && !req.appUser) return { denied: true };
+    if (read === 'owner') return req.appUser ? { owner: req.appUser.id } : { denied: true };
+    return {};
+  }
+
   api.get('/:pid/db/:coll', (req, res) => {
-    let rows = D.all('SELECT * FROM app_records WHERE project_id = ? AND collection = ? ORDER BY created_at, id', req.pid, req.params.coll).map(recordOut);
-    if (req.query.mine === '1' || req.query.mine === 'true') {
-      rows = req.appUser ? rows.filter((r) => r.owner_id === req.appUser.id) : [];
+    const f = readFilter(req);
+    if (f.denied) return res.status(403).json(DENIED);
+    let sql = 'SELECT * FROM app_records WHERE project_id = ? AND collection = ?';
+    const args = [req.pid, req.params.coll];
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    if (mine && !req.appUser) return res.json([]);
+    const owner = f.owner || (mine ? req.appUser.id : null);
+    if (owner) {
+      sql += ' AND owner_id = ?';
+      args.push(owner);
     }
     if (req.query.where) {
       let where;
@@ -116,30 +137,48 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
       } catch {
         return res.status(400).json({ error: 'Nieprawidłowy parametr where' });
       }
-      if (where && typeof where === 'object') rows = rows.filter((r) => Object.entries(where).every(([k, v]) => JSON.stringify(r[k]) === JSON.stringify(v)));
+      if (!where || typeof where !== 'object' || Array.isArray(where)) return res.status(400).json({ error: 'where musi być obiektem' });
+      for (const [k, v] of Object.entries(where)) {
+        if (k === 'id' || k === 'owner_id') {
+          sql += ` AND ${k} = ?`;
+          args.push(String(v));
+          continue;
+        }
+        if (!validKey(k)) return res.status(400).json({ error: `Nieprawidłowe pole: ${k}` });
+        const expr = `json_extract(data, '$."${k}"')`;
+        if (v === null) sql += ` AND ${expr} IS NULL`;
+        else if (typeof v === 'boolean') {
+          sql += ` AND ${expr} = ?`;
+          args.push(v ? 1 : 0);
+        } else if (typeof v === 'number' || typeof v === 'string') {
+          sql += ` AND ${expr} = ?`;
+          args.push(v);
+        } else return res.status(400).json({ error: `Pole ${k}: można porównywać tylko tekst, liczby, true/false i null` });
+      }
     }
-    const sort = String(req.query.sort || '');
-    if (sort) {
-      const desc = sort.startsWith('-');
-      const key = sort.replace(/^[-+]/, '');
-      rows.sort((a, b) => {
-        const x = a[key], y = b[key];
-        const c = x === y ? 0 : x === undefined ? 1 : y === undefined ? -1 : x > y ? 1 : -1;
-        return desc ? -c : c;
-      });
-    }
-    const offset = Math.max(0, Number(req.query.offset) || 0);
-    const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 100));
-    res.json(rows.slice(offset, offset + limit));
+    const sort = String(req.query.sort || 'created_at');
+    const desc = sort.startsWith('-');
+    const key = sort.replace(/^[-+]/, '');
+    if (!validKey(key)) return res.status(400).json({ error: 'Nieprawidłowe pole sortowania' });
+    const col = key === 'created_at' || key === 'updated_at' ? key : `json_extract(data, '$."${key}"')`;
+    sql += ` ORDER BY ${col} ${desc ? 'DESC' : 'ASC'}, created_at ${desc ? 'DESC' : 'ASC'}, id`;
+    const offset = Math.max(0, Math.floor(Number(req.query.offset)) || 0);
+    const limit = Math.min(1000, Math.max(1, Math.floor(Number(req.query.limit)) || 100));
+    sql += ' LIMIT ? OFFSET ?';
+    args.push(limit, offset);
+    res.json(D.all(sql, ...args).map(recordOut));
   });
 
   api.post('/:pid/db/:coll', limited('write', 120, 60_000), (req, res) => {
+    const { write } = req.rules;
+    if (write === 'none') return res.status(403).json(DENIED);
+    if (write === 'auth' && !req.appUser) return res.status(401).json({ error: 'Zaloguj się, aby to zrobić' });
     const data = cleanData(req.body);
     if (!data) return res.status(400).json({ error: 'Dane muszą być obiektem' });
     const json = JSON.stringify(data);
     if (json.length > 100_000) return res.status(413).json({ error: 'Rekord jest za duży (maks. 100 KB)' });
-    const count = D.one('SELECT COUNT(*) AS n FROM app_records WHERE project_id = ?', req.pid).n;
-    if (count >= MAX_RECORDS) return res.status(507).json({ error: 'Osiągnięto limit rekordów aplikacji' });
+    const stats = D.one('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(data)), 0) AS bytes FROM app_records WHERE project_id = ?', req.pid);
+    if (stats.n >= MAX_RECORDS || stats.bytes + json.length > MAX_BYTES) return res.status(507).json({ error: 'Osiągnięto limit danych aplikacji' });
     const id = D.newId(8);
     const now = Date.now();
     D.run('INSERT INTO app_records (id, project_id, collection, owner_id, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', id, req.pid, req.params.coll, req.appUser?.id || null, json, now, now);
@@ -147,21 +186,26 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   });
 
   function findRecord(req, res) {
-    const r = D.one('SELECT * FROM app_records WHERE id = ? AND project_id = ? AND collection = ?', req.params.rid, req.pid, req.params.coll);
+    const r = D.one('SELECT * FROM app_records WHERE id = ? AND project_id = ? AND collection = ?', String(req.params.rid), req.pid, req.params.coll);
     if (!r) res.status(404).json({ error: 'Rekord nie istnieje' });
     return r;
   }
+  function canRead(req, r) {
+    const f = readFilter(req);
+    return !f.denied && (!f.owner || r.owner_id === f.owner);
+  }
+  // edycja: rekord zalogowanego – tylko on; rekord anonimowy – tylko gdy kolekcja ma edit: "public"
   function canWrite(req, res, r) {
-    if (r.owner_id && r.owner_id !== req.appUser?.id) {
-      res.status(403).json({ error: 'Brak uprawnień – ten rekord należy do innego użytkownika' });
-      return false;
-    }
-    return true;
+    const ok = r.owner_id ? r.owner_id === req.appUser?.id : req.rules.edit === 'public';
+    if (!ok) res.status(403).json({ error: r.owner_id ? 'Brak uprawnień – ten rekord należy do innego użytkownika' : 'Brak uprawnień do zmiany tego rekordu' });
+    return ok;
   }
 
   api.get('/:pid/db/:coll/:rid', (req, res) => {
     const r = findRecord(req, res);
-    if (r) res.json(recordOut(r));
+    if (!r) return;
+    if (!canRead(req, r)) return res.status(403).json(DENIED);
+    res.json(recordOut(r));
   });
 
   api.patch('/:pid/db/:coll/:rid', limited('write', 120, 60_000), (req, res) => {
@@ -205,10 +249,11 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
     }
     if (rest === '' || rest.endsWith('/')) rest += 'index.html';
     let name = safePath(rest);
-    if (name && files[name] === undefined && files[name + '.html'] !== undefined) name += '.html';
+    if (!name && rest && !/\.[A-Za-z0-9]+$/.test(rest)) name = safePath(rest + '.html');
+    else if (name && !has(files, name) && has(files, name + '.html')) name += '.html';
     res.set('Cache-Control', 'no-store');
     if (sandboxHeader) res.set('Content-Security-Policy', sandboxHeader);
-    if (name && files[name] !== undefined) {
+    if (name && has(files, name)) {
       const mime = mimeOf(name);
       let body = files[name];
       if (mime === 'text/html') body = injectHtml(body, project.id, mode, req, base);
@@ -227,6 +272,10 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   }
 
   const byId = (id) => D.getProject(id);
+  const byPreviewKey = (key) => {
+    const row = D.one('SELECT id FROM projects WHERE preview_key = ?', key);
+    return row ? D.getProject(row.id) : null;
+  };
   const bySlug = (slug) => {
     const row = D.one('SELECT id FROM projects WHERE slug = ?', slug);
     return row ? D.getProject(row.id) : null;
@@ -239,8 +288,8 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
       if (host === wildcardHost || !host.endsWith('.' + wildcardHost)) return next();
       const sub = host.slice(0, -(wildcardHost.length + 1));
       let ctx = null;
-      if (/^[a-f0-9]{12}$/.test(sub)) {
-        const p = byId(sub);
+      if (/^[a-f0-9]{16}$/.test(sub)) {
+        const p = byPreviewKey(sub);
         if (p) ctx = { project: p, files: p.files, mode: 'preview', base: '/' };
       } else {
         const p = bySlug(sub);
@@ -263,7 +312,7 @@ export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
       sendFile(req, res, { project: p, files, mode, base: `/${prefix}/${key}/` }, rest);
     };
   }
-  app.get(/^\/preview\/([a-f0-9]{12})\/?(.*)$/, route(byId, 'preview', 'preview'));
+  app.get(/^\/preview\/([a-f0-9]{16})\/?(.*)$/, route(byPreviewKey, 'preview', 'preview'));
   app.get(/^\/p\/([a-f0-9]{12})\/?(.*)$/, route(byId, 'published', 'p'));
   app.get(/^\/s\/([a-z0-9-]{3,40})\/?(.*)$/, route(bySlug, 'published', 's'));
 
