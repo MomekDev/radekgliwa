@@ -1339,7 +1339,8 @@ function renderPublish() {
   const p = S.project;
   const pub = p.published;
   $('#btn-publish-menu span').textContent = pub ? 'Opublikowano' : 'Opublikuj';
-  $('#slug-prefix').textContent = new URL(p.previewUrl).host + '/s/';
+  $('#slug-prefix').textContent = p.slugPrefix || '';
+  $('#slug-suffix').textContent = p.slugSuffix || '';
   if (document.activeElement !== $('#slug-input')) $('#slug-input').value = p.slug || '';
   $('#publish-state').textContent = pub
     ? `Opublikowano ${fmtAgo(pub.at)}. Zmiany wprowadzone później nie są widoczne publicznie, dopóki nie klikniesz „Aktualizuj”.`
@@ -1390,6 +1391,28 @@ $('#btn-unpublish').onclick = async () => {
     toast(err.message, true);
   }
 };
+$('#btn-project-settings').onclick = async () => {
+  const p = S.project;
+  const v = await ask({
+    title: 'Ustawienia projektu',
+    text: 'Instrukcje są dołączane do każdej prośby do AI – np. kolory marki, styl, ton tekstów, dane firmy.',
+    fields: [
+      { name: 'name', label: 'Nazwa projektu', value: p.name },
+      { name: 'instructions', label: 'Instrukcje dla AI', type: 'textarea', rows: 8, value: p.instructions, placeholder: 'Np. Kolory marki: #1f6feb i #f5a623. Styl minimalistyczny. Teksty po polsku, zwracaj się do klienta per „Ty”. Telefon: 600 100 200.' },
+    ],
+    okText: 'Zapisz',
+    validate: (v) => (!v.name.trim() ? 'Podaj nazwę' : null),
+  });
+  if (!v) return;
+  try {
+    S.project = await api(`/api/projects/${p.id}`, { method: 'PATCH', body: { name: v.name, instructions: v.instructions } });
+    renderAll();
+    toast('Zapisano ustawienia projektu');
+  } catch (err) {
+    toast(err.message, true);
+  }
+};
+
 $('#btn-download').onclick = () => {
   if (!Object.keys(S.project.files).length) return toast('Projekt nie ma jeszcze plików', true);
   location.href = `/api/projects/${S.project.id}/download`;

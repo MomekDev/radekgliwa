@@ -12,8 +12,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // ---------- konfiguracja ----------
 const PORT = Number(process.env.PORT || 3000);
 const SITES_MODE = process.env.SITES_HOST ? 'host' : process.env.SITES_MODE === 'same' ? 'same' : 'port';
+// SITES_WILDCARD=1 (z SITES_HOST): każdy projekt na własnej subdomenie – pełna izolacja stron różnych użytkowników
+// SITES_HOST może zawierać port (np. sites.localhost:3000) – do porównań używamy samej nazwy hosta
+const SITES_HOSTNAME = (process.env.SITES_HOST || '').split(':')[0];
+const WILDCARD = SITES_MODE === 'host' && process.env.SITES_WILDCARD === '1' ? process.env.SITES_HOST : null;
 const SITES_PORT = Number(process.env.SITES_PORT || PORT + 1);
 const ALLOW_SIGNUP = process.env.ALLOW_SIGNUP !== '0';
+// ufamy nagłówkom X-Forwarded-* tylko od proxy w sieci prywatnej (np. Nginx, Caddy, Render) – chyba że ustawiono inaczej
+const TRUST_PROXY = process.env.TRUST_PROXY === '1' ? true : process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal';
+const SECURE_COOKIES = (process.env.PUBLIC_URL || '').startsWith('https://');
 
 // adres serwera stron widziany z przeglądarki
 function sitesUrl(req) {
@@ -23,15 +30,26 @@ function sitesUrl(req) {
   return `${req.protocol}://${req.hostname}:${SITES_PORT}`;
 }
 
+// adresy podglądu i publikacji projektu
+function siteUrls(req, p) {
+  if (WILDCARD) {
+    const proto = process.env.SITES_PROTOCOL || req.protocol;
+    return { preview: `${proto}://${p.id}.${WILDCARD}/`, published: p.slug ? `${proto}://${p.slug}.${WILDCARD}/` : null };
+  }
+  const base = sitesUrl(req);
+  return { preview: `${base}/preview/${p.id}/`, published: p.slug ? `${base}/s/${p.slug}/` : `${base}/p/${p.id}/` };
+}
+
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+app.set('trust proxy', TRUST_PROXY);
 
 // tryb jednej domeny: strony użytkowników na podanym hoście
 let sitesApp = null;
 if (SITES_MODE === 'host') {
-  sitesApp = createSitesApp({ builderOrigin: () => process.env.PUBLIC_URL || '' });
-  app.use((req, res, next) => (req.hostname === process.env.SITES_HOST ? sitesApp(req, res, next) : next()));
+  sitesApp = createSitesApp({ builderOrigin: () => process.env.PUBLIC_URL || '', wildcardHost: WILDCARD ? SITES_HOSTNAME : null });
+  const SH = SITES_HOSTNAME;
+  app.use((req, res, next) => (req.hostname === SH || (WILDCARD && req.hostname.endsWith('.' + SH)) ? sitesApp(req, res, next) : next()));
 }
 
 app.use(express.json({ limit: '30mb' }));
@@ -61,7 +79,7 @@ function setSessionCookie(req, res, userId) {
   const token = D.newToken();
   const maxAge = 30 * 86400;
   D.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', token, userId, Date.now() + maxAge * 1000);
-  res.set('Set-Cookie', `sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure ? '; Secure' : ''}`);
+  res.set('Set-Cookie', `sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure || SECURE_COOKIES ? '; Secure' : ''}`);
 }
 
 const userOut = (u) => ({ id: u.id, email: u.email, name: u.name });
@@ -126,8 +144,9 @@ app.get('/api/usage', requireUser, (req, res) => {
 });
 
 // ---------- projekty ----------
+const RESERVED_SLUGS = new Set(['www', 'api', 'app', 'admin', 'mail', 'static', 'assets', 'preview', 'sites']);
 function projectView(p, req) {
-  const base = sitesUrl(req);
+  const urls = siteUrls(req, p);
   return {
     id: p.id,
     name: p.name,
@@ -138,10 +157,11 @@ function projectView(p, req) {
     assets: D.listAssets(p.id),
     messages: D.getMessages(p.id),
     versions: D.all('SELECT id, label, ts FROM versions WHERE project_id = ? ORDER BY ts', p.id),
-    previewUrl: `${base}/preview/${p.id}/`,
-    published: p.published_at
-      ? { at: p.published_at, url: p.slug ? `${base}/s/${p.slug}/` : `${base}/p/${p.id}/` }
-      : null,
+    instructions: p.instructions || '',
+    previewUrl: urls.preview,
+    slugPrefix: WILDCARD ? null : `${sitesUrl(req).replace(/^https?:\/\//, '')}/s/`,
+    slugSuffix: WILDCARD ? `.${WILDCARD}` : null,
+    published: p.published_at && urls.published ? { at: p.published_at, url: urls.published } : null,
     generating: !!getJob(p.id),
   };
 }
@@ -161,7 +181,6 @@ function notBusy(req, res, next) {
 
 app.get('/api/projects', requireUser, (req, res) => {
   const rows = D.all('SELECT id, name, slug, files, published_at, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC', req.user.id);
-  const base = sitesUrl(req);
   res.json(
     rows.map((p) => ({
       id: p.id,
@@ -170,7 +189,7 @@ app.get('/api/projects', requireUser, (req, res) => {
       createdAt: p.created_at,
       hasFiles: p.files !== '{}',
       published: !!p.published_at,
-      previewUrl: `${base}/preview/${p.id}/`,
+      previewUrl: siteUrls(req, p).preview,
       generating: !!getJob(p.id),
     }))
   );
@@ -192,9 +211,13 @@ app.patch('/api/projects/:id', withProject, (req, res) => {
     if (!name) return res.status(400).json({ error: 'Nazwa nie może być pusta' });
     D.run('UPDATE projects SET name = ? WHERE id = ?', name.slice(0, 80), p.id);
   }
+  if (req.body?.instructions !== undefined) {
+    D.run('UPDATE projects SET instructions = ? WHERE id = ?', String(req.body.instructions).slice(0, 5000), p.id);
+  }
   if (req.body?.slug !== undefined) {
     const slug = req.body.slug ? slugify(req.body.slug) : null;
     if (slug !== null && slug.length < 3) return res.status(400).json({ error: 'Adres musi mieć co najmniej 3 znaki (litery, cyfry, myślniki)' });
+    if (slug && (/^[a-f0-9]{12}$/.test(slug) || RESERVED_SLUGS.has(slug))) return res.status(400).json({ error: 'Ten adres jest zarezerwowany – wybierz inny' });
     if (slug && D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) return res.status(409).json({ error: 'Ten adres jest już zajęty' });
     D.run('UPDATE projects SET slug = ? WHERE id = ?', slug, p.id);
   }
@@ -296,7 +319,7 @@ app.post('/api/projects/:id/publish', withProject, (req, res) => {
   let slug = p.slug;
   if (!slug) {
     const base = slugify(p.name) || 'strona';
-    slug = base.length >= 3 ? base : `strona-${base}`;
+    slug = base.length >= 3 && !RESERVED_SLUGS.has(base) && !/^[a-f0-9]{12}$/.test(base) ? base : `strona-${base}`.slice(0, 40);
     if (D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) slug = `${slug.slice(0, 33)}-${p.id.slice(0, 6)}`;
   }
   D.run('UPDATE projects SET published_files = ?, published_at = ?, slug = ? WHERE id = ?', JSON.stringify(p.files), Date.now(), slug, p.id);
@@ -312,7 +335,8 @@ app.delete('/api/projects/:id/publish', withProject, (req, res) => {
 app.get('/api/projects/:id/download', withProject, async (req, res) => {
   const p = req.project;
   const zip = new JSZip();
-  const sdkTag = `<script src="${sitesUrl(req)}/_kreator/sdk.js" data-project="${p.id}"></script>`;
+  const sdkBase = WILDCARD ? `${process.env.SITES_PROTOCOL || req.protocol}://${WILDCARD}` : sitesUrl(req);
+  const sdkTag = `<script src="${sdkBase}/_kreator/sdk.js" data-project="${p.id}"></script>`;
   for (const [name, content] of Object.entries(p.files)) {
     let body = content;
     if (/\.html?$/.test(name)) {

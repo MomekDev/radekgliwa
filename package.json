@@ -5,8 +5,8 @@
   "main": "server/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "demo": "DEMO=1 node --disable-warning=ExperimentalWarning server/index.js"
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
+    "demo": "DEMO=1 node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js"
   },
   "keywords": [],
   "author": "",

@@ -254,7 +254,7 @@ table.data td.actions { white-space: nowrap; text-align: right; }
   .mobile-only { display: inline-flex !important; }
   .tabs button span { display: none; }
   .tabs button.active span { display: inline; }
-  .name-input, .topbar > .brand-mark, #btn-download { display: none; }
+  .name-input, .topbar > .brand-mark, #btn-download, #btn-project-settings { display: none; }
   .topbar { gap: 4px; padding: 0 6px; }
   .tabs { overflow-x: auto; }
   .tabs button { padding: 5px 8px; }

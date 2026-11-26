@@ -108,7 +108,7 @@ function buildMessages(project, history, req) {
   for (const img of req.images || []) content.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
   content.push({
     type: 'text',
-    text: `${filesDump(project.files, D.listAssets(project.id))}\n\n---\n${req.mode === 'chat' ? CHAT_MODE_NOTE + '\n\n' : ''}WIADOMOŚĆ UŻYTKOWNIKA:\n${userPromptText(req)}`,
+    text: `${project.instructions ? `INSTRUKCJE PROJEKTU (stałe wytyczne właściciela – zawsze ich przestrzegaj):\n${project.instructions}\n\n` : ''}${filesDump(project.files, D.listAssets(project.id))}\n\n---\n${req.mode === 'chat' ? CHAT_MODE_NOTE + '\n\n' : ''}WIADOMOŚĆ UŻYTKOWNIKA:\n${userPromptText(req)}`,
   });
   msgs.push({ role: 'user', content });
   return msgs;

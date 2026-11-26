@@ -8,10 +8,10 @@ import { safePath, mimeOf, escHtml, rateLimit } from './util.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export function createSitesApp({ builderOrigin, sandboxHeader }) {
+export function createSitesApp({ builderOrigin, sandboxHeader, wildcardHost }) {
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  app.set('trust proxy', process.env.TRUST_PROXY === '1' ? true : process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal');
 
   // statyczne skrypty kreatora (SDK + mostek podglądu)
   app.use('/_kreator', express.static(path.join(here, '..', 'sites-static'), { maxAge: '5m' }));
@@ -186,64 +186,86 @@ export function createSitesApp({ builderOrigin, sandboxHeader }) {
   app.use('/_api', api);
 
   // ---------- serwowanie plików stron ----------
-  function injectHtml(html, projectId, mode, req) {
+  function injectHtml(html, projectId, mode, req, base) {
     let tags = `<script src="/_kreator/sdk.js" data-project="${projectId}"></script>`;
-    if (mode === 'preview') tags += `<script src="/_kreator/bridge.js" data-builder="${escHtml(builderOrigin(req))}"></script>`;
+    if (mode === 'preview') tags += `<script src="/_kreator/bridge.js" data-builder="${escHtml(builderOrigin(req))}" data-base="${escHtml(base)}"></script>`;
     const m = html.match(/<head[^>]*>/i);
     if (m) return html.slice(0, m.index + m[0].length) + tags + html.slice(m.index + m[0].length);
     return tags + html;
   }
 
-  function serve(resolve, mode) {
-    return (req, res) => {
-      const key = req.params[0];
-      let rest = req.params[1] || '';
-      if (!req.path.endsWith('/') && rest === '') return res.redirect(301, req.originalUrl.replace(/(\?|$)/, '/$1'));
-      const found = resolve(key);
-      if (!found) return res.status(404).type('html').send('<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif;padding:24px">Ta strona nie istnieje lub nie jest opublikowana.</p>');
-      const { project, files } = found;
-      try {
-        rest = decodeURIComponent(rest);
-      } catch {
-        return res.sendStatus(400);
-      }
-      if (rest === '' || rest.endsWith('/')) rest += 'index.html';
-      let name = safePath(rest);
-      if (name && files[name] === undefined && files[name + '.html'] !== undefined) name += '.html';
-      res.set('Cache-Control', 'no-store');
-      if (sandboxHeader) res.set('Content-Security-Policy', sandboxHeader);
-      if (name && files[name] !== undefined) {
-        const mime = mimeOf(name);
-        let body = files[name];
-        if (mime === 'text/html') body = injectHtml(body, project.id, mode, req);
-        res.set('Content-Type', `${mime}; charset=utf-8`);
-        return res.send(body);
-      }
-      const asset = name && D.one('SELECT mime, data FROM assets WHERE project_id = ? AND name = ?', project.id, name);
-      if (asset) {
-        res.set('Content-Type', asset.mime);
-        return res.send(Buffer.from(asset.data));
-      }
-      if (!Object.keys(files).length) {
-        return res.type('html').send(injectHtml('<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#999">Opisz w czacie, co chcesz zbudować…</body></html>', project.id, mode, req));
-      }
-      res.status(404).type('html').send(injectHtml(`<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;padding:24px">404 – nie znaleziono pliku <code>${escHtml(rest)}</code></body></html>`, project.id, mode, req));
-    };
+  const NOT_FOUND = '<!doctype html><meta charset="utf-8"><title>Nie znaleziono</title><p style="font-family:sans-serif;padding:24px">Ta strona nie istnieje lub nie jest opublikowana.</p>';
+
+  // wysyła plik `rest` z projektu; base = prefiks ścieżki strony (np. "/preview/<id>/" albo "/")
+  function sendFile(req, res, { project, files, mode, base }, rest) {
+    try {
+      rest = decodeURIComponent(rest);
+    } catch {
+      return res.sendStatus(400);
+    }
+    if (rest === '' || rest.endsWith('/')) rest += 'index.html';
+    let name = safePath(rest);
+    if (name && files[name] === undefined && files[name + '.html'] !== undefined) name += '.html';
+    res.set('Cache-Control', 'no-store');
+    if (sandboxHeader) res.set('Content-Security-Policy', sandboxHeader);
+    if (name && files[name] !== undefined) {
+      const mime = mimeOf(name);
+      let body = files[name];
+      if (mime === 'text/html') body = injectHtml(body, project.id, mode, req, base);
+      res.set('Content-Type', `${mime}; charset=utf-8`);
+      return res.send(body);
+    }
+    const asset = name && D.one('SELECT mime, data FROM assets WHERE project_id = ? AND name = ?', project.id, name);
+    if (asset) {
+      res.set('Content-Type', asset.mime);
+      return res.send(Buffer.from(asset.data));
+    }
+    if (!Object.keys(files).length) {
+      return res.type('html').send(injectHtml('<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#999">Opisz w czacie, co chcesz zbudować…</body></html>', project.id, mode, req, base));
+    }
+    res.status(404).type('html').send(injectHtml(`<!doctype html><html><head><meta charset="utf-8"><title>404</title></head><body style="font-family:sans-serif;padding:24px">404 – nie znaleziono pliku <code>${escHtml(rest)}</code></body></html>`, project.id, mode, req, base));
   }
 
-  app.get(/^\/preview\/([a-f0-9]{12})\/?(.*)$/, serve((id) => {
-    const p = D.getProject(id);
-    return p && { project: p, files: p.files };
-  }, 'preview'));
-  app.get(/^\/p\/([a-f0-9]{12})\/?(.*)$/, serve((id) => {
-    const p = D.getProject(id);
-    return p?.published_files && { project: p, files: p.published_files };
-  }, 'published'));
-  app.get(/^\/s\/([a-z0-9-]{3,40})\/?(.*)$/, serve((slug) => {
+  const byId = (id) => D.getProject(id);
+  const bySlug = (slug) => {
     const row = D.one('SELECT id FROM projects WHERE slug = ?', slug);
-    const p = row && D.getProject(row.id);
-    return p?.published_files && { project: p, files: p.published_files };
-  }, 'published'));
+    return row ? D.getProject(row.id) : null;
+  };
+
+  if (wildcardHost) {
+    // każdy projekt na własnej subdomenie: <id>.host = podgląd, <slug>.host = opublikowana strona
+    app.use((req, res, next) => {
+      const host = req.hostname;
+      if (host === wildcardHost || !host.endsWith('.' + wildcardHost)) return next();
+      const sub = host.slice(0, -(wildcardHost.length + 1));
+      let ctx = null;
+      if (/^[a-f0-9]{12}$/.test(sub)) {
+        const p = byId(sub);
+        if (p) ctx = { project: p, files: p.files, mode: 'preview', base: '/' };
+      } else {
+        const p = bySlug(sub);
+        if (p?.published_files) ctx = { project: p, files: p.published_files, mode: 'published', base: '/' };
+      }
+      if (req.method !== 'GET' && req.method !== 'HEAD') return res.sendStatus(405);
+      if (!ctx) return res.status(404).type('html').send(NOT_FOUND);
+      sendFile(req, res, ctx, req.path.slice(1));
+    });
+  }
+
+  function route(resolve, mode, prefix) {
+    return (req, res) => {
+      const key = req.params[0];
+      const rest = req.params[1] || '';
+      if (!req.path.endsWith('/') && rest === '') return res.redirect(301, req.originalUrl.replace(/(\?|$)/, '/$1'));
+      const p = resolve(key);
+      const files = p && (mode === 'preview' ? p.files : p.published_files);
+      if (!files) return res.status(404).type('html').send(NOT_FOUND);
+      sendFile(req, res, { project: p, files, mode, base: `/${prefix}/${key}/` }, rest);
+    };
+  }
+  app.get(/^\/preview\/([a-f0-9]{12})\/?(.*)$/, route(byId, 'preview', 'preview'));
+  app.get(/^\/p\/([a-f0-9]{12})\/?(.*)$/, route(byId, 'published', 'p'));
+  app.get(/^\/s\/([a-z0-9-]{3,40})\/?(.*)$/, route(bySlug, 'published', 's'));
 
   app.get('/', (req, res) => res.type('html').send('<!doctype html><meta charset="utf-8"><title>Kreator – strony</title><p style="font-family:sans-serif;padding:24px">Serwer stron Kreatora.</p>'));
   return app;

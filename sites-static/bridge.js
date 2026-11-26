@@ -9,8 +9,10 @@
     try { window.parent.postMessage(msg, target); } catch (e) {}
   }
 
-  var m = location.pathname.match(/^\/preview\/[a-f0-9]+\/(.*)$/);
-  var page = (m && m[1]) || 'index.html';
+  var base = (script && script.getAttribute('data-base')) || '/';
+  var path = location.pathname;
+  var page = (path.indexOf(base) === 0 ? decodeURIComponent(path.slice(base.length)) : '') || 'index.html';
+  if (/\/$/.test(page)) page += 'index.html';
   post({ type: 'loaded', page: page });
 
   // ---- błędy

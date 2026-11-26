@@ -97,6 +97,13 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 );
 `);
 
+// migracje
+for (const sql of ["ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''"]) {
+  try {
+    db.exec(sql);
+  } catch {}
+}
+
 export const newId = (bytes = 6) => crypto.randomBytes(bytes).toString('hex');
 export const newToken = () => crypto.randomBytes(32).toString('base64url');
 
