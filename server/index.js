@@ -1,0 +1,458 @@
+import express from 'express';
+import JSZip from 'jszip';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import * as D from './db.js';
+import { safePath, slugify, rateLimit, mimeOf, TEXT_EXT } from './util.js';
+import { startJob, getJob, stopJob, DEMO, MODEL } from './ai.js';
+import { createSitesApp } from './sites.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+// ---------- konfiguracja ----------
+const PORT = Number(process.env.PORT || 3000);
+const SITES_MODE = process.env.SITES_HOST ? 'host' : process.env.SITES_MODE === 'same' ? 'same' : 'port';
+const SITES_PORT = Number(process.env.SITES_PORT || PORT + 1);
+const ALLOW_SIGNUP = process.env.ALLOW_SIGNUP !== '0';
+
+// adres serwera stron widziany z przeglądarki
+function sitesUrl(req) {
+  if (process.env.SITES_URL) return process.env.SITES_URL.replace(/\/$/, '');
+  if (SITES_MODE === 'host') return `${req.protocol}://${process.env.SITES_HOST}`;
+  if (SITES_MODE === 'same') return `${req.protocol}://${req.get('host')}`;
+  return `${req.protocol}://${req.hostname}:${SITES_PORT}`;
+}
+
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', true);
+
+// tryb jednej domeny: strony użytkowników na podanym hoście
+let sitesApp = null;
+if (SITES_MODE === 'host') {
+  sitesApp = createSitesApp({ builderOrigin: () => process.env.PUBLIC_URL || '' });
+  app.use((req, res, next) => (req.hostname === process.env.SITES_HOST ? sitesApp(req, res, next) : next()));
+}
+
+app.use(express.json({ limit: '30mb' }));
+app.use((err, req, res, next) => res.status(400).json({ error: 'Nieprawidłowe dane' }));
+app.use(express.static(path.join(here, '..', 'public'), { index: 'index.html' }));
+app.use('/vendor/codemirror', express.static(path.join(here, '..', 'node_modules', 'codemirror'), { maxAge: '7d' }));
+
+// ---------- sesje i ochrona CSRF ----------
+function getCookie(req, name) {
+  const m = String(req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  // wymuszamy własny nagłówek przy zmianach – przeglądarka nie pozwoli go wysłać obcej stronie bez CORS
+  if (req.method !== 'GET' && req.get('X-Kreator') !== '1') return res.status(403).json({ error: 'Brak nagłówka X-Kreator' });
+  const token = getCookie(req, 'sid');
+  if (token) {
+    const u = D.one('SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?', token, Date.now());
+    if (u) req.user = { ...u };
+  }
+  next();
+});
+
+function setSessionCookie(req, res, userId) {
+  const token = D.newToken();
+  const maxAge = 30 * 86400;
+  D.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', token, userId, Date.now() + maxAge * 1000);
+  res.set('Set-Cookie', `sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure ? '; Secure' : ''}`);
+}
+
+const userOut = (u) => ({ id: u.id, email: u.email, name: u.name });
+
+// ---------- konta ----------
+app.get('/api/status', (req, res) =>
+  res.json({ mode: DEMO ? 'demo' : 'live', model: MODEL, sitesUrl: sitesUrl(req), allowSignup: ALLOW_SIGNUP, user: req.user ? userOut(req.user) : null })
+);
+
+app.post('/api/auth/register', (req, res) => {
+  if (!ALLOW_SIGNUP) return res.status(403).json({ error: 'Rejestracja jest wyłączona' });
+  if (!rateLimit(`reg:${req.ip}`, 10, 3600_000)) return res.status(429).json({ error: 'Za dużo prób – spróbuj później' });
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+  const name = String(req.body?.name || '').trim().slice(0, 60) || email.split('@')[0];
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Podaj prawidłowy adres e-mail' });
+  if (password.length < 8) return res.status(400).json({ error: 'Hasło musi mieć co najmniej 8 znaków' });
+  if (D.one('SELECT id FROM users WHERE email = ?', email)) return res.status(409).json({ error: 'Konto z tym adresem już istnieje' });
+  const id = D.newId(8);
+  D.run('INSERT INTO users (id, email, name, pass_hash, created_at) VALUES (?, ?, ?, ?, ?)', id, email, name, D.hashPassword(password), Date.now());
+  setSessionCookie(req, res, id);
+  res.status(201).json({ user: { id, email, name } });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  if (!rateLimit(`login:${req.ip}`, 20, 600_000)) return res.status(429).json({ error: 'Za dużo prób – spróbuj za kilka minut' });
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const u = D.one('SELECT * FROM users WHERE email = ?', email);
+  if (!u || !D.verifyPassword(String(req.body?.password || ''), u.pass_hash)) return res.status(401).json({ error: 'Nieprawidłowy e-mail lub hasło' });
+  setSessionCookie(req, res, u.id);
+  res.json({ user: userOut(u) });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const token = getCookie(req, 'sid');
+  if (token) D.run('DELETE FROM sessions WHERE token = ?', token);
+  res.set('Set-Cookie', 'sid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.json({ ok: true });
+});
+
+app.patch('/api/auth/me', requireUser, (req, res) => {
+  const name = String(req.body?.name || '').trim().slice(0, 60);
+  if (name) D.run('UPDATE users SET name = ? WHERE id = ?', name, req.user.id);
+  if (req.body?.newPassword !== undefined) {
+    const u = D.one('SELECT pass_hash FROM users WHERE id = ?', req.user.id);
+    if (!D.verifyPassword(String(req.body.currentPassword || ''), u.pass_hash)) return res.status(400).json({ error: 'Obecne hasło jest nieprawidłowe' });
+    if (String(req.body.newPassword).length < 8) return res.status(400).json({ error: 'Nowe hasło musi mieć co najmniej 8 znaków' });
+    D.run('UPDATE users SET pass_hash = ? WHERE id = ?', D.hashPassword(String(req.body.newPassword)), req.user.id);
+  }
+  res.json({ user: userOut(D.one('SELECT * FROM users WHERE id = ?', req.user.id)) });
+});
+
+function requireUser(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Zaloguj się' });
+  next();
+}
+
+app.get('/api/usage', requireUser, (req, res) => {
+  const total = D.one('SELECT COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, COUNT(*) AS requests FROM usage WHERE user_id = ?', req.user.id);
+  const month = D.one('SELECT COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output, COUNT(*) AS requests FROM usage WHERE user_id = ? AND ts > ?', req.user.id, Date.now() - 30 * 86400_000);
+  res.json({ total, month });
+});
+
+// ---------- projekty ----------
+function projectView(p, req) {
+  const base = sitesUrl(req);
+  return {
+    id: p.id,
+    name: p.name,
+    slug: p.slug,
+    createdAt: p.created_at,
+    updatedAt: p.updated_at,
+    files: p.files,
+    assets: D.listAssets(p.id),
+    messages: D.getMessages(p.id),
+    versions: D.all('SELECT id, label, ts FROM versions WHERE project_id = ? ORDER BY ts', p.id),
+    previewUrl: `${base}/preview/${p.id}/`,
+    published: p.published_at
+      ? { at: p.published_at, url: p.slug ? `${base}/s/${p.slug}/` : `${base}/p/${p.id}/` }
+      : null,
+    generating: !!getJob(p.id),
+  };
+}
+
+function withProject(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Zaloguj się' });
+  const p = D.getProject(req.params.id);
+  if (!p || p.user_id !== req.user.id) return res.status(404).json({ error: 'Nie znaleziono projektu' });
+  req.project = p;
+  next();
+}
+
+function notBusy(req, res, next) {
+  if (getJob(req.project.id)) return res.status(409).json({ error: 'Trwa generowanie – poczekaj lub je zatrzymaj' });
+  next();
+}
+
+app.get('/api/projects', requireUser, (req, res) => {
+  const rows = D.all('SELECT id, name, slug, files, published_at, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC', req.user.id);
+  const base = sitesUrl(req);
+  res.json(
+    rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      updatedAt: p.updated_at,
+      createdAt: p.created_at,
+      hasFiles: p.files !== '{}',
+      published: !!p.published_at,
+      previewUrl: `${base}/preview/${p.id}/`,
+      generating: !!getJob(p.id),
+    }))
+  );
+});
+
+app.post('/api/projects', requireUser, (req, res) => {
+  const now = Date.now();
+  const id = D.newId();
+  D.run('INSERT INTO projects (id, user_id, name, files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', id, req.user.id, String(req.body?.name || 'Nowy projekt').slice(0, 80), '{}', now, now);
+  res.status(201).json(projectView(D.getProject(id), req));
+});
+
+app.get('/api/projects/:id', withProject, (req, res) => res.json(projectView(req.project, req)));
+
+app.patch('/api/projects/:id', withProject, (req, res) => {
+  const p = req.project;
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return res.status(400).json({ error: 'Nazwa nie może być pusta' });
+    D.run('UPDATE projects SET name = ? WHERE id = ?', name.slice(0, 80), p.id);
+  }
+  if (req.body?.slug !== undefined) {
+    const slug = req.body.slug ? slugify(req.body.slug) : null;
+    if (slug !== null && slug.length < 3) return res.status(400).json({ error: 'Adres musi mieć co najmniej 3 znaki (litery, cyfry, myślniki)' });
+    if (slug && D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) return res.status(409).json({ error: 'Ten adres jest już zajęty' });
+    D.run('UPDATE projects SET slug = ? WHERE id = ?', slug, p.id);
+  }
+  D.touchProject(p.id);
+  res.json(projectView(D.getProject(p.id), req));
+});
+
+app.delete('/api/projects/:id', withProject, notBusy, (req, res) => {
+  D.run('DELETE FROM projects WHERE id = ?', req.project.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/projects/:id/duplicate', withProject, (req, res) => {
+  const src = req.project;
+  const id = D.newId();
+  const now = Date.now();
+  D.tx(() => {
+    D.run('INSERT INTO projects (id, user_id, name, files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', id, req.user.id, `${src.name} (kopia)`.slice(0, 80), JSON.stringify(src.files), now, now);
+    D.run('INSERT INTO assets (project_id, name, mime, data, size, ts) SELECT ?, name, mime, data, size, ts FROM assets WHERE project_id = ?', id, src.id);
+    D.run('INSERT INTO versions (id, project_id, label, files, ts) VALUES (?, ?, ?, ?, ?)', D.newId(), id, `Kopia projektu „${src.name}”`, JSON.stringify(src.files), now);
+  });
+  res.status(201).json(projectView(D.getProject(id), req));
+});
+
+// --- pliki (ręczna edycja)
+app.put('/api/projects/:id/files', withProject, notBusy, (req, res) => {
+  const p = req.project;
+  const fp = safePath(req.body?.path);
+  if (!fp || !TEXT_EXT.test(fp)) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku (dozwolone: .html, .css, .js, .json, .svg, .txt, .md, .xml)' });
+  if (fp.startsWith('assets/') && D.one('SELECT 1 FROM assets WHERE project_id = ? AND name = ?', p.id, fp)) return res.status(409).json({ error: 'Istnieje już wgrany plik o tej nazwie' });
+  const content = String(req.body?.content ?? '');
+  if (content.length > 2_000_000) return res.status(413).json({ error: 'Plik jest za duży' });
+  const isNew = !(fp in p.files);
+  if (!isNew && p.files[fp] === content) return res.json(projectView(p, req));
+  D.saveFiles(p.id, { ...p.files, [fp]: content }, isNew ? `Nowy plik: ${fp}` : `Ręczna edycja: ${fp}`);
+  res.json(projectView(D.getProject(p.id), req));
+});
+
+app.post('/api/projects/:id/files/rename', withProject, notBusy, (req, res) => {
+  const p = req.project;
+  const from = safePath(req.body?.from);
+  const to = safePath(req.body?.to);
+  if (!from || !(from in p.files)) return res.status(404).json({ error: 'Brak pliku' });
+  if (!to || !TEXT_EXT.test(to)) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
+  if (to in p.files) return res.status(409).json({ error: 'Plik o tej nazwie już istnieje' });
+  const files = { ...p.files, [to]: p.files[from] };
+  delete files[from];
+  D.saveFiles(p.id, files, `Zmiana nazwy: ${from} → ${to}`);
+  res.json(projectView(D.getProject(p.id), req));
+});
+
+app.delete('/api/projects/:id/files', withProject, notBusy, (req, res) => {
+  const p = req.project;
+  const fp = safePath(req.query.path);
+  if (!fp || !(fp in p.files)) return res.status(404).json({ error: 'Brak pliku' });
+  const files = { ...p.files };
+  delete files[fp];
+  D.saveFiles(p.id, files, `Usunięto plik: ${fp}`);
+  res.json(projectView(D.getProject(p.id), req));
+});
+
+// --- wgrane pliki binarne (obrazy itp.)
+const ASSET_MIME = /^(image\/(png|jpeg|gif|webp|svg\+xml|x-icon)|video\/(mp4|webm)|audio\/mpeg|font\/(woff2?)|application\/pdf)$/;
+app.post('/api/projects/:id/assets', withProject, (req, res) => {
+  const p = req.project;
+  let name = String(req.body?.name || '').toLowerCase().replace(/[^\w.\-]+/g, '-').replace(/^-+/, '');
+  if (!name || !/\.\w+$/.test(name)) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
+  name = safePath('assets/' + name);
+  const mime = mimeOf(name);
+  if (!name || !ASSET_MIME.test(mime)) return res.status(400).json({ error: 'Dozwolone: obrazy, wideo MP4/WEBM, MP3, czcionki WOFF, PDF' });
+  const data = Buffer.from(String(req.body?.data || ''), 'base64');
+  if (!data.length) return res.status(400).json({ error: 'Pusty plik' });
+  if (data.length > 10 * 1024 * 1024) return res.status(413).json({ error: 'Maksymalny rozmiar pliku to 10 MB' });
+  const total = D.one('SELECT COALESCE(SUM(size),0) AS s FROM assets WHERE project_id = ?', p.id).s;
+  if (total + data.length > 100 * 1024 * 1024) return res.status(413).json({ error: 'Przekroczono limit 100 MB plików w projekcie' });
+  D.run('INSERT OR REPLACE INTO assets (project_id, name, mime, data, size, ts) VALUES (?, ?, ?, ?, ?, ?)', p.id, name, mime, data, data.length, Date.now());
+  D.touchProject(p.id);
+  res.status(201).json({ name, project: projectView(D.getProject(p.id), req) });
+});
+
+app.delete('/api/projects/:id/assets', withProject, (req, res) => {
+  const r = D.run('DELETE FROM assets WHERE project_id = ? AND name = ?', req.project.id, String(req.query.name || ''));
+  if (!r.changes) return res.status(404).json({ error: 'Brak pliku' });
+  res.json(projectView(D.getProject(req.project.id), req));
+});
+
+// --- wersje
+app.post('/api/projects/:id/restore', withProject, notBusy, (req, res) => {
+  const v = D.one('SELECT * FROM versions WHERE id = ? AND project_id = ?', String(req.body?.versionId || ''), req.project.id);
+  if (!v) return res.status(404).json({ error: 'Nie znaleziono wersji' });
+  D.saveFiles(req.project.id, JSON.parse(v.files), `Przywrócono: ${v.label}`);
+  res.json(projectView(D.getProject(req.project.id), req));
+});
+
+// --- publikacja
+app.post('/api/projects/:id/publish', withProject, (req, res) => {
+  const p = req.project;
+  if (!p.files['index.html']) return res.status(400).json({ error: 'Projekt nie ma pliku index.html' });
+  let slug = p.slug;
+  if (!slug) {
+    const base = slugify(p.name) || 'strona';
+    slug = base.length >= 3 ? base : `strona-${base}`;
+    if (D.one('SELECT id FROM projects WHERE slug = ? AND id != ?', slug, p.id)) slug = `${slug.slice(0, 33)}-${p.id.slice(0, 6)}`;
+  }
+  D.run('UPDATE projects SET published_files = ?, published_at = ?, slug = ? WHERE id = ?', JSON.stringify(p.files), Date.now(), slug, p.id);
+  res.json(projectView(D.getProject(p.id), req));
+});
+
+app.delete('/api/projects/:id/publish', withProject, (req, res) => {
+  D.run('UPDATE projects SET published_files = NULL, published_at = NULL WHERE id = ?', req.project.id);
+  res.json(projectView(D.getProject(req.project.id), req));
+});
+
+// --- eksport ZIP (z dołączonym SDK, żeby baza danych działała także po pobraniu)
+app.get('/api/projects/:id/download', withProject, async (req, res) => {
+  const p = req.project;
+  const zip = new JSZip();
+  const sdkTag = `<script src="${sitesUrl(req)}/_kreator/sdk.js" data-project="${p.id}"></script>`;
+  for (const [name, content] of Object.entries(p.files)) {
+    let body = content;
+    if (/\.html?$/.test(name)) {
+      const m = body.match(/<head[^>]*>/i);
+      body = m ? body.slice(0, m.index + m[0].length) + sdkTag + body.slice(m.index + m[0].length) : sdkTag + body;
+    }
+    zip.file(name, body);
+  }
+  for (const a of D.all('SELECT name, data FROM assets WHERE project_id = ?', p.id)) zip.file(a.name, Buffer.from(a.data));
+  const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  res.set('Content-Type', 'application/zip');
+  res.set('Content-Disposition', `attachment; filename="${slugify(p.name) || 'strona'}.zip"`);
+  res.send(buf);
+});
+
+// --- czat z AI
+const IMG_TYPES = /^image\/(png|jpeg|gif|webp)$/;
+app.post('/api/projects/:id/chat', withProject, (req, res) => {
+  const p = req.project;
+  const message = String(req.body?.message || '').trim().slice(0, 20000);
+  if (!message) return res.status(400).json({ error: 'Wiadomość jest pusta' });
+  if (!rateLimit(`ai:${req.user.id}`, Number(process.env.AI_RATE_LIMIT || 30), 3600_000)) return res.status(429).json({ error: 'Osiągnięto limit wiadomości do AI na godzinę' });
+  const images = Array.isArray(req.body?.images) ? req.body.images.slice(0, 4) : [];
+  for (const img of images) {
+    if (!IMG_TYPES.test(img?.media_type) || typeof img?.data !== 'string') return res.status(400).json({ error: 'Nieobsługiwany format obrazu (PNG, JPG, GIF, WEBP)' });
+  }
+  const sel = req.body?.selection;
+  const selection = sel && typeof sel === 'object' ? { selector: String(sel.selector || '').slice(0, 300), html: String(sel.html || '').slice(0, 2000), page: String(sel.page || '').slice(0, 200) } : null;
+  const errors = Array.isArray(req.body?.errors) ? req.body.errors.slice(0, 10).map((e) => String(e).slice(0, 600)) : null;
+  try {
+    startJob(p, req.user.id, { message, images, mode: req.body?.mode === 'chat' ? 'chat' : 'build', selection, errors });
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+  res.status(202).json({ ok: true });
+});
+
+app.post('/api/projects/:id/stop', withProject, (req, res) => res.json({ stopped: stopJob(req.project.id) }));
+
+// strumień SSE z postępem generowania (można się podłączyć ponownie w każdej chwili)
+app.get('/api/projects/:id/stream', withProject, (req, res) => {
+  const p = req.project;
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders();
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  const job = getJob(p.id);
+  if (!job) {
+    send('done', { project: projectView(D.getProject(p.id), req), changed: [], note: null });
+    return res.end();
+  }
+  send('snapshot', { text: job.text });
+  const onDelta = (t) => send('delta', { text: t });
+  const onDone = (r) => {
+    const fresh = D.getProject(p.id);
+    if (fresh) send('done', { project: projectView(fresh, req), ...r });
+    cleanup();
+    res.end();
+  };
+  const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+  function cleanup() {
+    clearInterval(ping);
+    job.off('delta', onDelta);
+    job.off('done', onDone);
+  }
+  job.on('delta', onDelta);
+  job.on('done', onDone);
+  req.on('close', cleanup);
+});
+
+// --- dane aplikacji (panel „Baza danych”)
+const validColl = (c) => /^[A-Za-z][\w-]{0,49}$/.test(c);
+const recordOut = (r) => ({ id: r.id, owner_id: r.owner_id, created_at: r.created_at, updated_at: r.updated_at, data: JSON.parse(r.data) });
+
+app.get('/api/projects/:id/data', withProject, (req, res) => {
+  const pid = req.project.id;
+  res.json({
+    collections: D.all('SELECT collection AS name, COUNT(*) AS count FROM app_records WHERE project_id = ? GROUP BY collection ORDER BY collection', pid),
+    users: D.all('SELECT id, email, name, created_at FROM app_users WHERE project_id = ? ORDER BY created_at DESC', pid),
+  });
+});
+
+app.get('/api/projects/:id/data/:coll', withProject, (req, res) => {
+  if (!validColl(req.params.coll)) return res.status(400).json({ error: 'Nieprawidłowa kolekcja' });
+  res.json(D.all('SELECT * FROM app_records WHERE project_id = ? AND collection = ? ORDER BY created_at DESC LIMIT 1000', req.project.id, req.params.coll).map(recordOut));
+});
+
+app.post('/api/projects/:id/data/:coll', withProject, (req, res) => {
+  if (!validColl(req.params.coll)) return res.status(400).json({ error: 'Nieprawidłowa nazwa kolekcji (litery, cyfry, _ i -, zaczyna się literą)' });
+  const data = req.body?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return res.status(400).json({ error: 'Dane muszą być obiektem JSON' });
+  const id = D.newId(8);
+  const now = Date.now();
+  D.run('INSERT INTO app_records (id, project_id, collection, owner_id, data, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?)', id, req.project.id, req.params.coll, JSON.stringify(data), now, now);
+  res.status(201).json(recordOut(D.one('SELECT * FROM app_records WHERE id = ?', id)));
+});
+
+app.put('/api/projects/:id/data/:coll/:rid', withProject, (req, res) => {
+  const data = req.body?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return res.status(400).json({ error: 'Dane muszą być obiektem JSON' });
+  for (const k of ['id', 'created_at', 'updated_at', 'owner_id']) delete data[k];
+  const r = D.run('UPDATE app_records SET data = ?, updated_at = ? WHERE id = ? AND project_id = ? AND collection = ?', JSON.stringify(data), Date.now(), req.params.rid, req.project.id, req.params.coll);
+  if (!r.changes) return res.status(404).json({ error: 'Rekord nie istnieje' });
+  res.json(recordOut(D.one('SELECT * FROM app_records WHERE id = ?', req.params.rid)));
+});
+
+app.delete('/api/projects/:id/data/:coll/:rid', withProject, (req, res) => {
+  const r = D.run('DELETE FROM app_records WHERE id = ? AND project_id = ? AND collection = ?', req.params.rid, req.project.id, req.params.coll);
+  if (!r.changes) return res.status(404).json({ error: 'Rekord nie istnieje' });
+  res.json({ ok: true });
+});
+
+app.delete('/api/projects/:id/data/:coll', withProject, (req, res) => {
+  D.run('DELETE FROM app_records WHERE project_id = ? AND collection = ?', req.project.id, req.params.coll);
+  res.json({ ok: true });
+});
+
+app.delete('/api/projects/:id/app-users/:uid', withProject, (req, res) => {
+  const r = D.run('DELETE FROM app_users WHERE id = ? AND project_id = ?', req.params.uid, req.project.id);
+  if (!r.changes) return res.status(404).json({ error: 'Użytkownik nie istnieje' });
+  res.json({ ok: true });
+});
+
+app.use('/api', (req, res) => res.status(404).json({ error: 'Nieznany adres API' }));
+
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// ---------- start ----------
+if (SITES_MODE === 'same') {
+  // jedna domena: strony w trybie sandbox (bez dostępu do kreatora, ale bez localStorage)
+  app.use(createSitesApp({ builderOrigin: () => '', sandboxHeader: 'sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads' }));
+}
+
+app.listen(PORT, () => {
+  console.log(`Kreator: http://localhost:${PORT}  (${DEMO ? 'TRYB DEMO – bez AI' : `AI: ${MODEL}`})`);
+});
+
+if (SITES_MODE === 'port') {
+  // origin kreatora = ten sam host co strona, port kreatora
+  const sites = createSitesApp({ builderOrigin: (req) => process.env.PUBLIC_URL || `${req.protocol}://${req.hostname}:${PORT}` });
+  sites.listen(SITES_PORT, () => console.log(`Strony użytkowników: http://localhost:${SITES_PORT}`));
+}
+
+setInterval(() => D.cleanupSessions(), 3600_000).unref();

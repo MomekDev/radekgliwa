@@ -1,41 +1,109 @@
-// Wspólny parser odpowiedzi AI (używany przez serwer i przeglądarkę).
+// Wspólny parser odpowiedzi AI (serwer + przeglądarka).
 // Format odpowiedzi modelu:
 //   tekst dla użytkownika
 //   <file path="index.html">...pełna zawartość...</file>
+//   <edit path="index.html">
+//   <<<<<<< SEARCH
+//   stary fragment
+//   =======
+//   nowy fragment
+//   >>>>>>> REPLACE
+//   </edit>
 //   <delete path="stary.js" />
+//   <suggestion>Dodaj formularz kontaktowy</suggestion>
 
 function stripFence(content) {
   const m = content.match(/^\s*```[\w-]*\n([\s\S]*?)\n?```\s*$/);
   return m ? m[1] + '\n' : content;
 }
 
+export function parseHunks(body) {
+  const hunks = [];
+  const re = /<<<<<<< SEARCH\n([\s\S]*?)\n?=======\n([\s\S]*?)\n?>>>>>>> REPLACE/g;
+  let m;
+  while ((m = re.exec(body))) hunks.push({ search: m[1], replace: m[2] });
+  return hunks;
+}
+
 export function parseResponse(text) {
-  const files = [];
+  const blocks = []; // {kind:'file'|'edit', path, content, hunks, complete}
   const deletes = [];
+  const suggestions = [];
   let chat = '';
-  const open = /<file\s+path="([^"]+)"\s*>\n?/g;
+  const open = /<(file|edit)\s+path="([^"]+)"\s*>\n?/g;
   let pos = 0;
   while (true) {
     open.lastIndex = pos;
     const m = open.exec(text);
     chat += text.slice(pos, m ? m.index : text.length);
     if (!m) break;
+    const kind = m[1];
     const start = m.index + m[0].length;
-    const end = text.indexOf('</file>', start);
-    if (end === -1) {
-      files.push({ path: m[1], content: text.slice(start), complete: false });
+    const closeTag = `</${kind}>`;
+    const end = text.indexOf(closeTag, start);
+    const body = end === -1 ? text.slice(start) : text.slice(start, end);
+    const complete = end !== -1;
+    if (kind === 'file') blocks.push({ kind, path: m[2], content: complete ? stripFence(body) : body, complete });
+    else blocks.push({ kind, path: m[2], hunks: parseHunks(body), complete, content: body });
+    if (!complete) {
       pos = text.length;
       break;
     }
-    files.push({ path: m[1], content: stripFence(text.slice(start, end)), complete: true });
-    pos = end + '</file>'.length;
+    pos = end + closeTag.length;
   }
   chat = chat.replace(/<delete\s+path="([^"]+)"\s*\/?>/g, (_, p) => {
     deletes.push(p);
     return '';
   });
+  chat = chat.replace(/<suggestion>([\s\S]*?)<\/suggestion>/g, (_, s) => {
+    if (s.trim()) suggestions.push(s.trim());
+    return '';
+  });
   // ukryj niedokończony tag na końcu strumienia
-  chat = chat.replace(/<[a-z]*(\s[^<>]*)?$/i, '');
+  chat = chat.replace(/<\/?[a-z]*(\s[^<>]*)?$/i, '');
   chat = chat.replace(/\n{3,}/g, '\n\n').trim();
-  return { chat, files, deletes };
+  return { chat, blocks, deletes, suggestions };
+}
+
+// Zastosuj edycje SEARCH/REPLACE. Zwraca nową treść i listę nieudanych fragmentów.
+export function applyHunks(content, hunks) {
+  const failed = [];
+  for (const h of hunks) {
+    if (!h.search.trim()) {
+      failed.push(h);
+      continue;
+    }
+    const idx = content.indexOf(h.search);
+    if (idx !== -1) {
+      content = content.slice(0, idx) + h.replace + content.slice(idx + h.search.length);
+      continue;
+    }
+    // dopasowanie z pominięciem wcięć i białych znaków na końcach linii
+    const lines = content.split('\n');
+    const sLines = h.search.split('\n');
+    while (sLines.length && !sLines[sLines.length - 1].trim()) sLines.pop();
+    while (sLines.length && !sLines[0].trim()) sLines.shift();
+    const norm = (s) => s.trim();
+    let found = -1;
+    for (let i = 0; i + sLines.length <= lines.length && sLines.length; i++) {
+      let ok = true;
+      for (let j = 0; j < sLines.length; j++) {
+        if (norm(lines[i + j]) !== norm(sLines[j])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        found = i;
+        break;
+      }
+    }
+    if (found === -1) {
+      failed.push(h);
+      continue;
+    }
+    lines.splice(found, sLines.length, ...h.replace.split('\n'));
+    content = lines.join('\n');
+  }
+  return { content, failed };
 }
