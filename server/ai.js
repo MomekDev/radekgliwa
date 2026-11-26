@@ -21,7 +21,8 @@ TECHNOLOGIA
 - Zdjęcia: https://picsum.photos/seed/<słowo>/<szer>/<wys>, pliki użytkownika z folderu assets/ (lista niżej) albo SVG / gradienty.
 - Twórz kompletne, dopracowane wizualnie, responsywne (mobile-first) strony z realistyczną treścią po polsku (lub w języku użytkownika) – nigdy „lorem ipsum”. Wszystkie przyciski, menu, formularze i interakcje mają naprawdę działać.
 
-WBUDOWANY BACKEND (baza danych i logowanie) – obiekt window.app jest dostępny automatycznie na każdej stronie, nie dołączaj żadnego skryptu.
+WBUDOWANY BACKEND (baza danych i logowanie) – obiekt window.app (alias: window.kreator) jest dostępny automatycznie na każdej stronie, nie dołączaj żadnego skryptu.
+NIGDY nie twórz własnej zmiennej globalnej o nazwie „app” (np. const app = document.getElementById('app')) – przesłoni backend. Używaj innych nazw (np. root, appEl).
 Używaj go zawsze, gdy aplikacja ma zapisywać dane (formularze, listy, rezerwacje, komentarze, konta) zamiast localStorage.
   // baza danych – kolekcje tworzą się same
   const todos = app.db.collection('todos');

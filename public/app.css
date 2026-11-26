@@ -236,6 +236,9 @@ table.data td.actions { white-space: nowrap; text-align: right; }
 
 /* popover publikacji */
 .pop-wrap { position: relative; }
+#btn-publish-menu.has-dot { position: relative; }
+#btn-publish-menu.has-dot::after { content: ''; position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; border: 2px solid var(--bg); }
+.code-host.locked::after { content: 'AI pracuje – edycja zablokowana'; position: absolute; top: 8px; right: 12px; z-index: 5; font: 12px var(--font); color: #fff; background: rgba(0,0,0,.55); padding: 3px 8px; border-radius: 6px; }
 .popover { position: absolute; right: 0; top: calc(100% + 8px); width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; z-index: 50; }
 .popover h3 { font-size: 15px; }
 .slug-row { display: flex; align-items: center; gap: 4px; }
@@ -263,7 +266,8 @@ table.data td.actions { white-space: nowrap; text-align: right; }
   .mobile-only { display: inline-flex !important; }
   .tabs button span { display: none; }
   .tabs button.active span { display: inline; }
-  .name-input, .topbar > .brand-mark, #btn-download, #btn-project-settings { display: none; }
+  .name-input, .topbar > .brand-mark { display: none; }
+  #btn-download, #btn-project-settings { padding: 5px; }
   .topbar { gap: 4px; padding: 0 6px; }
   .tabs { overflow-x: auto; }
   .tabs button { padding: 5px 8px; }

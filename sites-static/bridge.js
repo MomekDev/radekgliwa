@@ -17,27 +17,36 @@
 
   // ---- błędy
   var sent = 0;
-  function report(text) {
-    if (sent++ > 20) return;
-    post({ type: 'error', message: String(text).slice(0, 600), page: page });
+  // level: 'error' (prawdziwy błąd – pokazuje baner) albo 'log' (console.error – tylko kontekst dla AI)
+  function report(text, level) {
+    if (sent++ > 30) return;
+    post({ type: 'error', message: String(text).slice(0, 600), page: page, level: level || 'error' });
   }
+  var IGNORE = /ResizeObserver loop|^Script error\.?$/i;
   window.addEventListener('error', function (e) {
-    if (e.target && e.target !== window && (e.target.src || e.target.href)) {
-      report('Nie udało się wczytać zasobu: ' + (e.target.src || e.target.href));
-    } else {
-      report((e.message || 'Błąd') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+    var t = e.target;
+    if (t && t !== window && (t.src || t.href)) {
+      var url = t.src || t.href;
+      // brakujące pliki z własnego projektu to realny problem; obce obrazki/skrypty – tylko informacja
+      var own = url.indexOf(location.origin) === 0;
+      report('Nie udało się wczytać pliku: ' + url, own ? 'error' : 'log');
+      return;
     }
+    var msg = e.message || 'Błąd';
+    if (IGNORE.test(msg) && !e.filename) return;
+    if (/ResizeObserver loop/.test(msg)) return;
+    report(msg + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''), 'error');
   }, true);
   window.addEventListener('unhandledrejection', function (e) {
     var r = e.reason;
-    report('Nieobsłużony błąd Promise: ' + (r && r.message ? r.message : String(r)));
+    report('Nieobsłużony błąd Promise: ' + (r && r.message ? r.message : String(r)), 'error');
   });
   var origError = console.error;
   console.error = function () {
     try {
       report(Array.prototype.map.call(arguments, function (a) {
         return a instanceof Error ? a.message : typeof a === 'object' ? JSON.stringify(a) : String(a);
-      }).join(' '));
+      }).join(' '), 'log');
     } catch (e) {}
     return origError.apply(console, arguments);
   };

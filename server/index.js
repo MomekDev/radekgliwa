@@ -172,7 +172,9 @@ function projectView(p, req) {
     previewUrl: urls.preview,
     slugPrefix: WILDCARD ? null : `${sitesUrl(req).replace(/^https?:\/\//, '')}/s/`,
     slugSuffix: WILDCARD ? `.${WILDCARD}` : null,
-    published: p.published_at && urls.published ? { at: p.published_at, url: urls.published } : null,
+    published: p.published_at && urls.published
+      ? { at: p.published_at, url: urls.published, outdated: JSON.stringify(p.files) !== JSON.stringify(p.published_files) }
+      : null,
     generating: !!getJob(p.id),
   };
 }

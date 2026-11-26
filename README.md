@@ -52,7 +52,7 @@ Bez klucza (albo z `npm run demo`) kreator działa w **trybie demo**. Zamiast AI
 
 ## Jak AI używa bazy danych
 
-Wygenerowane strony mają dostęp do obiektu `window.app`:
+Wygenerowane strony mają dostęp do obiektu `window.app` (oraz `window.kreator`, który działa nawet wtedy, gdy strona ma własną zmienną `app`):
 
 ```js
 const zadania = app.db.collection('zadania');

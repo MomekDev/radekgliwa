@@ -1,6 +1,6 @@
 /* Kreator SDK – wbudowany backend dla wygenerowanych aplikacji: window.app.db i window.app.auth */
 (function () {
-  if (window.app && window.app.__kreator) return;
+  if (window.kreator && window.kreator.__kreator) return;
   var script = document.currentScript;
   var projectId = script && script.getAttribute('data-project');
   var base = new URL('/_api/' + projectId + '/', script ? script.src : location.href).href;
@@ -38,6 +38,8 @@
       .catch(function () { throw new Error('Brak połączenia z serwerem'); })
       .then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (data) {
+          // wygasła lub usunięta sesja – wyloguj lokalnie
+          if (res.status === 401 && session && path.indexOf('auth/') !== 0) setSession(null);
           if (!res.ok) throw new Error(data.error || ('Błąd serwera (' + res.status + ')'));
           return data;
         });
@@ -90,5 +92,18 @@
   // sprawdź, czy zapisana sesja jest nadal ważna
   if (session) auth.me().catch(function () {});
 
-  window.app = { __kreator: true, projectId: projectId, db: { collection: collection }, auth: auth };
+  // logowanie/wylogowanie w innej karcie
+  window.addEventListener('storage', function (e) {
+    if (e.key !== KEY) return;
+    var next = null;
+    try { next = JSON.parse(e.newValue || 'null'); } catch (err) {}
+    session = next;
+    var u = next ? next.user : null;
+    listeners.slice().forEach(function (cb) { try { cb(u); } catch (err) { console.error(err); } });
+  });
+
+  var api = { __kreator: true, projectId: projectId, db: { collection: collection }, auth: auth };
+  // window.kreator zawsze działa; window.app – o ile strona nie nadpisze tej nazwy własną zmienną
+  window.kreator = api;
+  window.app = api;
 })();

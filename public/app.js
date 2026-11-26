@@ -66,6 +66,7 @@ function toast(msg, isError = false) {
   t.className = 'toast' + (isError ? ' error' : '');
   t.textContent = msg;
   $('#toasts').appendChild(t);
+  while ($('#toasts').children.length > 3) $('#toasts').firstElementChild.remove();
   setTimeout(() => t.remove(), isError ? 5000 : 3000);
 }
 
@@ -245,13 +246,13 @@ $('#auth-form').addEventListener('submit', async (e) => {
       allow401: true,
     });
     me = r.user;
+    const fn = afterAuth;
+    afterAuth = null;
     $('#auth-dialog').close();
     f.password.value = '';
     renderNav();
-    const fn = afterAuth;
-    afterAuth = null;
-    if (fn) fn();
-    else route();
+    route();
+    if (fn && fn !== route) fn();
   } catch (err) {
     $('#auth-error').textContent = err.message;
   } finally {
@@ -259,6 +260,7 @@ $('#auth-form').addEventListener('submit', async (e) => {
   }
 });
 $('#auth-dialog').addEventListener('close', () => {
+  afterAuth = null;
   if (!me && location.hash.startsWith('#/p/')) location.hash = '#/';
 });
 $$('[data-auth]').forEach((b) => (b.onclick = () => openAuth(b.dataset.auth)));
@@ -312,8 +314,23 @@ function renderNav() {
 }
 
 // ====================== routing ======================
-function route() {
+let lastHash = location.hash;
+let routing = false;
+async function route() {
   const m = location.hash.match(/^#\/p\/([a-f0-9]{12})/);
+  // opuszczasz projekt z niezapisanym kodem?
+  if (S.project && S.dirty && (!m || m[1] !== S.project.id) && !routing) {
+    routing = true;
+    const target = location.hash;
+    history.replaceState(null, '', lastHash || '#/');
+    const ok = await confirmDlg('Niezapisane zmiany', 'Masz niezapisane zmiany w kodzie. Porzucić je i przejść dalej?', 'Porzuć');
+    routing = false;
+    if (!ok) return;
+    S.dirty = false;
+    history.replaceState(null, '', target);
+    return route();
+  }
+  lastHash = location.hash;
   if (m && !me) {
     openAuth('login', route);
     return;
@@ -342,7 +359,17 @@ async function loadHome() {
   }
 }
 
+let homeTimer = null;
+function scheduleHomeRefresh() {
+  clearTimeout(homeTimer);
+  if (projectsCache.some((p) => p.generating)) {
+    homeTimer = setTimeout(() => {
+      if (!$('#home').hidden && me) loadHome();
+    }, 4000);
+  }
+}
 function renderProjects() {
+  scheduleHomeRefresh();
   const q = $('#project-search').value.trim().toLowerCase();
   const list = projectsCache.filter((p) => !q || p.name.toLowerCase().includes(q));
   const box = $('#projects');
@@ -445,7 +472,7 @@ $('#new-image').addEventListener('change', async (e) => {
 });
 autoGrow($('#new-prompt'));
 $('#new-prompt').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     $('#new-form').requestSubmit();
   }
@@ -503,21 +530,28 @@ function closeEditor() {
   S.streamCtl?.abort();
   S.streamCtl = null;
   S.project = null;
-  S.generating = false;
+  S.dirty = false;
+  setGenerating(false);
+  if (S.selecting) setSelecting(false);
 }
 
 async function openEditor(id) {
   if (S.project?.id === id) return;
   closeEditor();
   Object.assign(S, { file: null, dirty: false, page: 'index.html', selection: null, errors: [], dataView: null, assetView: null, images: [], raw: '' });
+  let proj;
   try {
-    S.project = await api(`/api/projects/${id}`);
+    proj = await api(`/api/projects/${id}`);
   } catch (err) {
     if (err.status !== 401) toast(err.message, true);
-    location.hash = '#/';
+    if (location.hash.includes(id)) location.hash = '#/';
     return;
   }
-  setTab(S.project.messages.length || pending ? 'preview' : 'preview');
+  // w międzyczasie użytkownik przeszedł gdzie indziej
+  if (!location.hash.includes(`/p/${id}`) || (S.project && S.project.id !== id)) return;
+  S.project = proj;
+  setGenerating(false);
+  setTab('preview');
   renderAll();
   reloadPreview();
   renderSelection();
@@ -560,6 +594,7 @@ async function setTab(tab) {
     S.dirty = false;
     renderFiles();
   }
+  if (tab !== 'preview' && S.selecting) setSelecting(false);
   S.tab = tab;
   $$('#tabs button').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
   for (const t of ['preview', 'code', 'data', 'history']) $(`#tab-${t}`).hidden = t !== tab;
@@ -567,6 +602,9 @@ async function setTab(tab) {
   if (tab === 'code') setTimeout(() => cm?.refresh(), 0);
   if (tab === 'data') loadData();
 }
+matchMedia('(min-width: 861px)').addEventListener('change', (e) => {
+  if (e.matches && S.tab === 'chat') setTab('preview');
+});
 $('#tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-tab]');
   if (b) setTab(b.dataset.tab);
@@ -598,6 +636,7 @@ function assistantHtml(m, { streaming = false, last = false } = {}) {
     html += `<div class="thinking"><span class="dots"><span></span><span></span><span></span></span>${writing ? `Piszę ${esc(writing.path)}…` : chat ? 'Pracuję…' : 'Myślę…'}</div>`;
   }
   if (meta.note) html += `<div class="note">${esc(meta.note)}</div>`;
+  if (last && !streaming && meta.note && /Błąd AI|restart serwera|zatrzymane/.test(meta.note)) html += `<button class="link small" data-retry="1">↻ Wyślij ponownie</button>`;
   const foot = [];
   if (meta.versionId && S.project.versions.some((v) => v.id === meta.versionId)) foot.push(`<button class="link small" data-restore="${meta.versionId}">↺ Przywróć tę wersję</button>`);
   if (meta.usage && (meta.usage.input || meta.usage.output)) foot.push(`<span title="Tokeny: wejście / wyjście">${fmtTok(meta.usage.input)} / ${fmtTok(meta.usage.output)} tokenów</span>`);
@@ -642,6 +681,10 @@ $('#messages').addEventListener('click', (e) => {
   if (r) return restoreVersion(r.dataset.restore);
   const s = e.target.closest('[data-suggest]');
   if (s && !S.generating) sendMessage(s.dataset.suggest, []);
+  if (e.target.closest('[data-retry]') && !S.generating) {
+    const lastUser = [...S.project.messages].reverse().find((m) => m.role === 'user');
+    if (lastUser) sendMessage(lastUser.content.replace(/\n\n\(Załączone obrazy zapisano w projekcie jako:[^)]*\)$/, ''), []);
+  }
 });
 
 // ---------- wysyłanie i strumień ----------
@@ -653,11 +696,13 @@ function setGenerating(on) {
   $('#frame-overlay').hidden = !on || empty;
   $('#frame-building').hidden = !on || !empty;
   for (const id of ['#btn-save-file', '#btn-delete-file', '#btn-rename-file', '#btn-new-file']) $(id).disabled = on;
-  if (on) $('#error-banner').hidden = true;
+  if (cm) cm.setOption('readOnly', on || !S.file);
+  $('#code-host').classList.toggle('locked', on);
+  renderErrors();
 }
 
 async function sendMessage(text, images = []) {
-  if (S.generating || !S.project) return;
+  if (S.generating || !S.project) return false;
   const p = S.project;
   let message = text;
   // zapisz załączone obrazy jako pliki projektu
@@ -680,22 +725,36 @@ async function sendMessage(text, images = []) {
     selection: S.selection,
     errors: S.pendingErrors || undefined,
   };
+  const errorsSent = S.pendingErrors;
   S.pendingErrors = null;
   try {
     await api(`/api/projects/${p.id}/chat`, { method: 'POST', body });
   } catch (err) {
     toast(err.message, true);
-    return;
+    // przywróć wiadomość, żeby nie przepadła
+    if (S.project?.id === p.id) {
+      if (!$('#chat-input').value.trim()) {
+        $('#chat-input').value = text;
+        fitChat();
+      }
+      if (!S.images.length && images.length) {
+        S.images = images;
+        renderChatAttachments();
+      }
+      S.pendingErrors = errorsSent;
+    }
+    return false;
   }
   S.selection = null;
   renderSelection();
   const fresh = await api(`/api/projects/${p.id}`).catch(() => null);
   if (fresh && S.project?.id === p.id) S.project = fresh;
-  if (S.tab !== 'preview' && S.tab !== 'chat' && window.innerWidth > 860) setTab('preview');
+  if (S.tab !== 'preview' && S.tab !== 'chat' && !S.dirty && window.innerWidth > 860) setTab('preview');
   subscribe();
+  return true;
 }
 
-async function subscribe() {
+async function subscribe(attempt = 0) {
   const p = S.project;
   if (!p) return;
   S.streamCtl?.abort();
@@ -739,27 +798,44 @@ async function subscribe() {
   if (S.streamCtl !== ctl || S.project?.id !== p.id) return;
   S.streamCtl = null;
   if (!result) {
-    // połączenie zerwane – spróbuj ponownie
+    // połączenie zerwane – próbuj ponownie z coraz dłuższą przerwą
+    const delay = Math.min(15000, 1000 * 2 ** attempt);
+    if (attempt === 1) toast('Utracono połączenie – łączę ponownie…', true);
     setTimeout(async () => {
-      if (S.project?.id !== p.id) return;
+      if (S.project?.id !== p.id || S.streamCtl) return;
       const fresh = await api(`/api/projects/${p.id}`).catch(() => null);
-      if (!fresh || S.project?.id !== p.id) return;
+      if (S.project?.id !== p.id || S.streamCtl) return;
+      if (!fresh) {
+        if (attempt < 12) return subscribe(attempt + 1);
+        setGenerating(false);
+        return toast('Brak połączenia z serwerem. Odśwież stronę.', true);
+      }
       S.project = fresh;
-      if (fresh.generating) subscribe();
+      if (fresh.generating) subscribe(attempt + 1);
       else {
         setGenerating(false);
         renderAll();
         reloadPreview();
       }
-    }, 1500);
+    }, delay);
     return;
   }
   setGenerating(false);
+  const openFile = S.file;
+  const keepMine = result.changed?.length && openFile && result.changed.includes(openFile) && S.dirty;
   S.project = result.project;
   if (result.note) toast(result.note, !/zatrzymane/.test(result.note));
-  if (result.changed?.length && S.file && result.changed.includes(S.file)) S.dirty = false;
   renderAll();
   if (result.changed?.length) reloadPreview();
+  if (keepMine) {
+    // AI zmieniło plik, w którym masz niezapisane zmiany – zapytaj, którą wersję zostawić
+    confirmDlg('AI zmieniło otwarty plik', `AI zmieniło ${openFile}, a Ty masz w nim niezapisane zmiany. Wczytać wersję AI (Twoje zmiany przepadną)? „Anuluj” zostawi Twoją wersję w edytorze – jej zapisanie nadpisze zmiany AI.`, 'Wczytaj wersję AI', false).then((load) => {
+      if (load && S.file === openFile) {
+        S.dirty = false;
+        renderFiles();
+      }
+    });
+  }
   if (window.innerWidth > 860) $('#chat-input').focus();
 }
 
@@ -788,7 +864,7 @@ $('#chat-form').addEventListener('submit', (e) => {
   sendMessage(text, imgs);
 });
 $('#chat-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     $('#chat-form').requestSubmit();
   }
@@ -885,7 +961,7 @@ window.addEventListener('message', (e) => {
     }
     if (S.selecting) postToPreview({ type: 'select', on: true });
   } else if (d.type === 'error') {
-    if (!S.errors.includes(d.message) && S.errors.length < 20) S.errors.push(d.message);
+    if (!S.errors.some((x) => x.message === d.message) && S.errors.length < 30) S.errors.push({ message: d.message, level: d.level || 'error' });
     renderErrors();
   } else if (d.type === 'selected') {
     S.selection = { selector: d.selector, html: d.html, page: d.page, tag: d.tag, text: d.text };
@@ -927,13 +1003,14 @@ $('#btn-clear-selection').onclick = () => {
 };
 
 function renderErrors() {
-  const n = S.errors.length;
+  const n = S.errors.filter((x) => x.level === 'error').length;
   $('#error-banner').hidden = !n || S.generating;
   $('#error-text').textContent = n ? `Na stronie wystąpił${n === 1 ? ' błąd' : 'y błędy'} (${n})` : '';
 }
-$('#btn-show-errors').onclick = () => ask({ title: 'Błędy na stronie', fields: [{ name: 'e', type: 'textarea', value: S.errors.join('\n\n'), rows: 8 }], okText: 'Zamknij' });
+$('#btn-show-errors').onclick = () =>
+  ask({ title: 'Błędy na stronie', fields: [{ name: 'e', type: 'textarea', value: S.errors.map((x) => (x.level === 'log' ? '[konsola] ' : '') + x.message).join('\n\n'), rows: 8 }], okText: 'Zamknij' });
 $('#btn-fix-errors').onclick = () => {
-  S.pendingErrors = [...S.errors];
+  S.pendingErrors = S.errors.map((x) => (x.level === 'log' ? '[console.error] ' : '') + x.message);
   S.mode = 'build';
   $$('#mode-toggle button').forEach((x) => x.classList.toggle('active', x.dataset.mode === 'build'));
   sendMessage('Na stronie wystąpiły błędy – znajdź przyczynę i napraw je.', []);
@@ -1151,11 +1228,15 @@ $('#asset-upload').addEventListener('change', async (e) => {
 let dataInfo = null;
 async function loadData() {
   if (!S.project) return;
+  const pid = S.project.id;
+  let info;
   try {
-    dataInfo = await api(`/api/projects/${S.project.id}/data`);
+    info = await api(`/api/projects/${pid}/data`);
   } catch (err) {
     return toast(err.message, true);
   }
+  if (S.project?.id !== pid) return;
+  dataInfo = info;
   $('#collections').innerHTML = dataInfo.collections.length
     ? dataInfo.collections
         .map((c) => `<button class="file${S.dataView?.type === 'collection' && S.dataView.name === c.name ? ' active' : ''}" data-coll="${esc(c.name)}">${ic('table')}${esc(c.name)}<span class="count">${c.count}</span></button>`)
@@ -1371,6 +1452,7 @@ $('#versions').addEventListener('click', (e) => {
 });
 async function restoreVersion(versionId) {
   if (S.generating) return toast('Poczekaj na koniec generowania', true);
+  if (!(await confirmDiscard())) return;
   if (!(await confirmDlg('Przywrócić tę wersję?', 'Obecny stan zostanie zachowany w historii, więc możesz do niego wrócić.', 'Przywróć', false))) return;
   try {
     S.project = await api(`/api/projects/${S.project.id}/restore`, { method: 'POST', body: { versionId } });
@@ -1387,13 +1469,16 @@ async function restoreVersion(versionId) {
 function renderPublish() {
   const p = S.project;
   const pub = p.published;
-  $('#btn-publish-menu span').textContent = pub ? 'Opublikowano' : 'Opublikuj';
+  $('#btn-publish-menu span').textContent = !pub ? 'Opublikuj' : pub.outdated ? 'Aktualizuj' : 'Opublikowano';
+  $('#btn-publish-menu').classList.toggle('has-dot', !!pub?.outdated);
   $('#slug-prefix').textContent = p.slugPrefix || '';
   $('#slug-suffix').textContent = p.slugSuffix || '';
   if (document.activeElement !== $('#slug-input')) $('#slug-input').value = p.slug || '';
-  $('#publish-state').textContent = pub
-    ? `Opublikowano ${fmtAgo(pub.at)}. Zmiany wprowadzone później nie są widoczne publicznie, dopóki nie klikniesz „Aktualizuj”.`
-    : 'Strona nie jest jeszcze publiczna. Po publikacji każdy z linkiem ją zobaczy.';
+  $('#publish-state').textContent = !pub
+    ? 'Strona nie jest jeszcze publiczna. Po publikacji każdy z linkiem ją zobaczy.'
+    : pub.outdated
+    ? `Opublikowano ${fmtAgo(pub.at)}. Od tego czasu wprowadzono zmiany – kliknij „Aktualizuj”, aby je pokazać publicznie.`
+    : `Opublikowano ${fmtAgo(pub.at)}. Publiczna strona jest aktualna.`;
   $('#btn-publish').textContent = pub ? 'Aktualizuj' : 'Opublikuj';
   $('#published-box').hidden = !pub;
   if (pub) {
