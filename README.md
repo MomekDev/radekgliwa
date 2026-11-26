@@ -66,6 +66,26 @@ await app.auth.signIn({ email, password });
 app.auth.onChange(user => { /* zalogowany lub null */ });
 ```
 
+### Kto ma dostęp do danych
+
+Uprawnienia każdej kolekcji są opisane w pliku projektu `database.rules.json`. AI tworzy go samo, a Ty możesz je zmienić w zakładce **Baza danych** przyciskiem „Zmień”:
+
+```json
+{
+  "kontakt": { "read": "private", "write": "public" },
+  "zadania": { "read": "owner",   "write": "auth" },
+  "posty":   { "read": "public",  "write": "auth" }
+}
+```
+
+- `read`: `public` (każdy) · `auth` (zalogowani) · `owner` (każdy widzi tylko swoje) · `private` (nikt na stronie, tylko Ty w panelu)
+- `write`: `public` · `auth` · `none`
+- `edit`: `owner` (rekord zmienia tylko autor) · `public` (każdy może zmieniać rekordy dodane anonimowo)
+
+Dane z formularzy (kontakt, rezerwacje, zamówienia) powinny być `private`, a AI ustawia to automatycznie.
+
+Podgląd niepublikowanej wersji działa pod tajnym, losowym adresem. Publicznie widać tylko to, co opublikujesz.
+
 ## Wdrożenie na serwer
 
 ### Docker
@@ -96,6 +116,14 @@ Za reverse proxy (Nginx, Caddy, Cloudflare, Render) ustaw `PUBLIC_URL=https://�
 
 Wszystkie opcje z opisami są w pliku `.env.example`: model AI, poziom wysiłku, limit wiadomości na godzinę i wyłączenie rejestracji.
 
+## Testy
+
+```bash
+npm test
+```
+
+Testy uruchamiają kreator w trybie demo z tymczasową bazą i sprawdzają konta, izolację użytkowników, generowanie, wersje, publikację, reguły dostępu do danych i parser odpowiedzi AI.
+
 ## Struktura projektu
 
 ```
@@ -106,4 +134,5 @@ server/db.js       baza SQLite (wbudowana w Node.js)
 server/mock.js     odpowiedzi trybu demo
 public/            interfejs kreatora (index.html, app.js, app.css) i parser odpowiedzi AI
 sites-static/      sdk.js (window.app dla stron) i bridge.js (błędy + wybór elementu w podglądzie)
+tests/             testy automatyczne (npm test)
 ```
